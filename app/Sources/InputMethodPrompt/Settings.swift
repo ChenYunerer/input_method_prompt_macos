@@ -26,6 +26,19 @@ final class AppSettings {
         set { defaults.set(newValue, forKey: "switchingPromptEnabled") }
     }
 
+    var switchingPromptDuration: Double {
+        get {
+            guard let value = defaults.object(forKey: "switchingPromptDuration") as? NSNumber else {
+                return Overlay.defaultDuration
+            }
+            return Overlay.clampedDuration(value.doubleValue)
+        }
+        set {
+            guard newValue.isFinite else { return }
+            defaults.set(Overlay.clampedDuration(newValue), forKey: "switchingPromptDuration")
+        }
+    }
+
     var fullScreenIndicatorEnabled: Bool {
         get { defaults.object(forKey: "fullScreenIndicatorEnabled") as? Bool ?? true }
         set { defaults.set(newValue, forKey: "fullScreenIndicatorEnabled") }
@@ -120,6 +133,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let onMouseChange: () -> Void
     private let loginItem: LoginItemManaging
     private let switchingSwitch = NSSwitch()
+    private let switchingDurationSeconds = NSTextField(string: "1.0")
+    private let switchingDurationStepper = NSStepper()
     private let fullScreenSwitch = NSSwitch()
     private let mouseSwitch = NSSwitch()
     private let mouseSizeSlider = NSSlider(value: 100, minValue: MouseIndicatorLayout.scaleRange.lowerBound * 100,
@@ -296,8 +311,31 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                   id: "backgroundTransparency", y: 218, action: #selector(transparencyChanged), in: page)
         label("数值越大越透明，文字保持清晰。", in: page,
               frame: NSRect(x: 216, y: 156, width: 296, height: 18), size: 11, secondary: true)
-        label("停留 0.5 秒 · 淡入淡出", in: page,
-              frame: NSRect(x: 216, y: 106, width: 296, height: 20), size: 12, secondary: true)
+        label("停留时长", in: page, frame: NSRect(x: 216, y: 112, width: 96, height: 20), size: 12)
+        switchingDurationSeconds.frame = NSRect(x: 318, y: 108, width: 64, height: 24)
+        switchingDurationSeconds.alignment = .right
+        switchingDurationSeconds.identifier = NSUserInterfaceItemIdentifier("switchingPromptDuration")
+        switchingDurationSeconds.setAccessibilityLabel("切换提示停留时长（秒）")
+        switchingDurationSeconds.toolTip = "0.1–10 秒，精确到 0.1 秒，默认 1 秒。"
+        switchingDurationSeconds.delegate = self
+        switchingDurationSeconds.target = self
+        switchingDurationSeconds.action = #selector(switchingDurationChanged)
+        page.addSubview(switchingDurationSeconds)
+        switchingDurationStepper.frame = NSRect(x: 386, y: 106, width: 19, height: 28)
+        switchingDurationStepper.minValue = Overlay.durationRange.lowerBound
+        switchingDurationStepper.maxValue = Overlay.durationRange.upperBound
+        switchingDurationStepper.increment = 0.1
+        switchingDurationStepper.valueWraps = false
+        switchingDurationStepper.identifier = NSUserInterfaceItemIdentifier("switchingPromptDurationStepper")
+        switchingDurationStepper.setAccessibilityLabel("调整切换提示停留秒数")
+        switchingDurationStepper.target = self
+        switchingDurationStepper.action = #selector(switchingDurationStepChanged)
+        page.addSubview(switchingDurationStepper)
+        label("秒（0.1–10）", in: page, frame: NSRect(x: 411, y: 111, width: 101, height: 20), size: 11, secondary: true)
+        label("完整停留时间，不包含淡入淡出。", in: page,
+              frame: NSRect(x: 216, y: 78, width: 296, height: 18), size: 11, secondary: true)
+        label("下次提示生效，默认 1 秒。", in: page,
+              frame: NSRect(x: 216, y: 56, width: 296, height: 18), size: 11, secondary: true)
         button("恢复默认外观", id: "resetSwitchingAppearance", action: #selector(resetTransparency),
                frame: NSRect(x: -6, y: 8, width: 122, height: 32), in: page)
         button("预览切换提示", id: "previewSwitchingPrompt", action: #selector(previewOnScreen),
@@ -475,6 +513,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     private func refreshSwitchingControls() {
         switchingSwitch.state = settings.switchingPromptEnabled ? .on : .off
+        switchingDurationSeconds.stringValue = String(format: "%.1f", settings.switchingPromptDuration)
+        switchingDurationStepper.doubleValue = settings.switchingPromptDuration
+        switchingDurationSeconds.isEnabled = settings.switchingPromptEnabled
+        switchingDurationStepper.isEnabled = settings.switchingPromptEnabled
         slider.isEnabled = settings.switchingPromptEnabled
         slider.doubleValue = (settings.transparency * 100).rounded()
         valueLabel.stringValue = "\(Int(slider.doubleValue))%"
@@ -518,6 +560,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     func controlTextDidEndEditing(_ notification: Notification) {
         if let field = notification.object as? NSTextField, field === mouseIdleSeconds { mouseIdleSecondsChanged() }
+        if let field = notification.object as? NSTextField, field === switchingDurationSeconds { switchingDurationChanged() }
+    }
+
+    @objc private func switchingDurationChanged() {
+        let text = switchingDurationSeconds.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let seconds = Double(text), seconds.isFinite, Overlay.durationRange.contains(seconds) else {
+            refreshSwitchingControls()
+            return
+        }
+        setSwitchingDuration(seconds)
+    }
+
+    @objc private func switchingDurationStepChanged() {
+        setSwitchingDuration(switchingDurationStepper.doubleValue)
+    }
+
+    private func setSwitchingDuration(_ seconds: Double) {
+        let duration = Overlay.clampedDuration(seconds)
+        guard duration != settings.switchingPromptDuration else { refreshSwitchingControls(); return }
+        settings.switchingPromptDuration = duration
+        refreshSwitchingControls()
+        onSwitchingChange()
     }
 
     @objc private func mouseIdleSecondsChanged() {
@@ -620,5 +684,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         onFullScreenChange()
     }
 
-    @objc private func previewOnScreen() { onPreview() }
+    @objc private func previewOnScreen() {
+        window?.makeFirstResponder(nil)
+        onPreview()
+    }
 }

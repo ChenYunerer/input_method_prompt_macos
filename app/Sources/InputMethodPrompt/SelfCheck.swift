@@ -30,15 +30,15 @@ enum SelfCheck {
         overlay.show(english)
         wait(0.30)
         check(overlay.panel.isVisible, "连续切换后，旧计时器不会提前关闭新提示")
-        wait(0.28)
+        wait(Overlay.defaultDuration - 0.30 + 0.08)
         check(overlay.panel.isVisible && overlay.panel.alphaValue > 0 && overlay.panel.alphaValue < 1,
-              "停留 0.5 秒后进入渐隐过程")
+              "达到默认停留时长后进入渐隐过程")
         let leavingAlpha = overlay.panel.alphaValue
         overlay.show(chinese)
         check(overlay.panel.alphaValue == leavingAlpha, "淡出过程中再次切换从当前透明度平滑恢复")
         wait(0.25)
         check(overlay.panel.isVisible && overlay.panel.alphaValue == 1, "旧动画不会隐藏新提示")
-        wait(0.60)
+        wait(Overlay.defaultDuration + 0.10)
         check(!overlay.panel.isVisible, "淡出完成后关闭窗口")
         check(NSWorkspace.shared.frontmostApplication?.processIdentifier == frontmost, "原来的前台应用保持不变")
         print("自检完成，失败数：\(failures)")

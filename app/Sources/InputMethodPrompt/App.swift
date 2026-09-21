@@ -6,7 +6,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let currentItem = NSMenuItem(title: "正在读取输入法…", action: nil, keyEquivalent: "")
     private let monitor = InputSourceMonitor()
     private let settings = AppSettings()
-    private lazy var overlay = Overlay(backgroundOpacity: settings.backgroundOpacity)
+    private lazy var overlay = Overlay(backgroundOpacity: settings.backgroundOpacity,
+                                       holdDuration: settings.switchingPromptDuration)
     private let fullScreenMonitor = FullScreenMonitor()
     private let mouseIndicator = MouseIndicator()
     private lazy var fullScreenIndicator = FullScreenIndicator(backgroundOpacity: settings.fullScreenBackgroundOpacity, scale: settings.fullScreenScale, position: settings.fullScreenPosition)
@@ -89,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applySwitchingSettings() {
+        overlay.updateHoldDuration(settings.switchingPromptDuration)
         if !settings.switchingPromptEnabled { overlay.hide() }
     }
 

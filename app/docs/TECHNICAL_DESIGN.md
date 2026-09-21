@@ -2,11 +2,11 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 实现基线 | 应用 1.10.0 / 构建号 28，源码提交 `e37acc2` |
+| 实现基线 | 应用 1.11.0 / 构建号 29，分支 `feat/switching-prompt-duration`（基于 `8885994`） |
 | 整理日期 | 2026-09-21 |
 | 需求基线 | [PRD](PRD.md) |
 | 源码仓库 | [ChenYunerer/input_method_prompt_macos](https://github.com/ChenYunerer/input_method_prompt_macos)，公开仓库，默认分支 `main` |
-| 本轮范围 | 同步当前设置、三种提示、临时展示、性能与稳定性机制，以及仓库和构建信息；仅更新文档 |
+| 本轮范围 | 新增中央切换提示停留时长配置、持久化、控件与计时回归 |
 
 第 1–14 节描述当前实现；第 15 节及第 16 节保留演进过程，版本标题下的旧行为仅用于解释改动。当前鼠标显示策略以第 16.9–16.12 节和 PRD 为准，验证记录注明其所属版本。
 
@@ -160,7 +160,7 @@ sequenceDiagram
 
 回归覆盖两种通知先后顺序、恢复原状态取消候选、截止时重新读取，以及真正持续开启 Caps Lock 的情形。确认窗口是过滤短暂状态的折中，不是对物理按键意图的判定；超出窗口的中间态、轮询间隔内的极短变化、系统调度延迟仍有边界。
 
-普通通知变化的确认开销约 100 ms；Caps Lock 还可能包含一次轮询等待及 250 ms 确认时间。这些不是严格延迟上限，不计入浮层的 0.5 秒停留。
+普通通知变化的确认开销约 100 ms；Caps Lock 还可能包含一次轮询等待及 250 ms 确认时间。这些不是严格延迟上限，不计入浮层的停留时长（默认 1 秒）。
 
 ## 6. 浮层与动画
 
@@ -186,7 +186,7 @@ stateDiagram-v2
     [*] --> Hidden
     Hidden --> FadeIn: show / alpha 从 0 开始
     FadeIn --> Hold: 到达 alpha 1
-    Hold --> FadeOut: 停留 0.5 秒
+    Hold --> FadeOut: 停留配置秒数（默认 1 秒）
     FadeOut --> Hidden: alpha 到达 0
     FadeIn --> FadeIn: 新状态 / 保留当前 alpha
     Hold --> Hold: 新状态 / 重置停留计时
@@ -195,9 +195,9 @@ stateDiagram-v2
 
 以上为行为模型；代码用 `dismissal` 与 `fadeTimer` 管理生命周期，没有单独的状态枚举。
 
-- 淡入 0.12 秒，停留 0.5 秒，淡出 0.18 秒。
+- 淡入 0.12 秒，停留默认 1 秒（可调 0.1–10 秒），淡出 0.18 秒。
 - 动画使用约 60 Hz 定时器及 `CACurrentMediaTime()`，插值曲线为 `eased = p² × (3 − 2p)`。
-- 普通独立展示约 0.8 秒；完整显示时重复触发不再淡入，直接重置停留计时。
+- 默认独立展示约 1.3 秒；完整显示时重复触发不再淡入，直接重置停留计时。
 - 所有展示前先取消两种旧定时器，防止旧回调隐藏新内容。
 - 隐藏时先取消定时器、`orderOut`，再复位窗口 alpha。
 - 定时器在主 RunLoop 的 `.common` 模式运行，不保证每帧准时；闭包弱引用持有者。
@@ -221,11 +221,12 @@ stateDiagram-v2
 
 ### 8.1 存储
 
-以下 11 项保存在 `UserDefaults.standard`，名称为实际存储键：
+以下 12 项保存在 `UserDefaults.standard`，名称为实际存储键：
 
 | 配置键 | 默认值 | 约束与影响范围 |
 | --- | --- | --- |
 | `switchingPromptEnabled` | `true` | 中央自动提示，手动预览不受限 |
+| `switchingPromptDuration` | `1.0` | 0.1–10 秒，步进 0.1 秒，下一次提示或预览生效 |
 | `backgroundTransparency` | `0.22` | 0–1，UI 整数百分比，仅影响中央背景 |
 | `fullScreenIndicatorEnabled` | `true` | 全屏常驻开关 |
 | `fullScreenTransparency` | `0.45` | 0–1，UI 整数百分比，仅影响常驻背景 |
@@ -249,7 +250,7 @@ stateDiagram-v2
 
 设置分为「切换提示 / 全屏常驻 / 鼠标跟随 / 通用」。`onChange` 更新中央背景，`onFullScreenChange` 更新常驻外观、位置和监测开关，`onMouseChange` 经 `AppDelegate.applyMouseSettings` 同步大小、整体透明度、静止秒数、行为及启用状态。只刷新被修改的分类，滑块量化后与旧值相同时跳过写入与回调。
 
-「预览切换提示」回调进入现有浮层展示逻辑。中央重置仅恢复透明度；全屏重置大小和透明度、不重置位置；鼠标重置大小和透明度、不重置静止秒数及行为。所有外观重置均不更改启用开关和登录项。
+「预览切换提示」回调进入现有浮层展示逻辑。中央重置仅恢复透明度、不重置停留时长；全屏重置大小和透明度、不重置位置；鼠标重置大小和透明度、不重置静止秒数及行为。所有外观重置均不更改启用开关和登录项。
 
 ## 9. 登录时自动启动
 
@@ -289,7 +290,7 @@ dist/中英提示.app/Contents/
 └── _CodeSignature/…
 ```
 
-关键元数据：Bundle ID `local.yun.InputMethodPrompt`，版本 `1.10.0`，构建号 `28`，最低系统 `13.0`，`CFBundleIconFile=AppIcon.icns`。构建使用当前机器架构，未输出 Universal 二进制。
+关键元数据：Bundle ID `local.yun.InputMethodPrompt`，版本 `1.11.0`，构建号 `29`，最低系统 `13.0`，`CFBundleIconFile=AppIcon.icns`。构建使用当前机器架构，未输出 Universal 二进制。
 
 命令从项目根目录执行：
 
@@ -303,7 +304,7 @@ bash app/scripts/test.sh
 默认输出为 `dist/中英提示.app`；可通过 `INPUT_PROMPT_APP_DIR` 指定完整 `.app` 路径。例如保留版本化产物：
 
 ```sh
-INPUT_PROMPT_APP_DIR="$PWD/dist/1.10.0/中英提示.app" bash app/scripts/build-app.sh
+INPUT_PROMPT_APP_DIR="$PWD/dist/1.11.0/中英提示.app" bash app/scripts/build-app.sh
 ```
 
 脚本先在输出所在文件系统创建临时目录，完成打包和验签后才替换旧包；替换失败时尝试恢复旧包。按输出路径加目录锁，拒绝同目标并发构建。输出不是普通 `.app` 目录或存在符号链接时拒绝覆盖；回滚目标被其他进程占用时保留备份供核对。SIGKILL 或断电无法执行清理，可能遗留锁或备份。
@@ -316,7 +317,7 @@ INPUT_PROMPT_APP_DIR="$PWD/dist/1.10.0/中英提示.app" bash app/scripts/build-
 
 ### 11.1 已有证据
 
-当前 1.10.0 / 构建 28 的历史回执：常规及真实指针回归 311 项通过，临时展示专项通过，release 构建与签名校验通过。测试环境为 macOS 15.7.9、Apple Silicon。1.9.1 的性能专项、原生全屏 6 项及构建失败回滚验证见 [专项记录](PERFORMANCE_STABILITY.md)。本次只更新文档，未重新执行这些运行时测试；下表保留各项既有证据的边界。
+当前 1.10.0 / 构建 28 的历史回执：常规及真实指针回归 311 项通过，临时展示专项通过，release 构建与签名校验通过。测试环境为 macOS 15.7.9、Apple Silicon。1.9.1 的性能专项、原生全屏 6 项及构建失败回滚验证见 [专项记录](PERFORMANCE_STABILITY.md)。上述为历史基线记录；1.11.0 新增时长配置验证见第 18 节，下表保留各项既有证据的边界。
 
 | 验证方式 | 已证实内容 | 不能据此推断 |
 | --- | --- | --- |
@@ -339,6 +340,7 @@ INPUT_PROMPT_APP_DIR="$PWD/dist/1.10.0/中英提示.app" bash app/scripts/build-
 bash app/scripts/test.sh
 bash app/scripts/test.sh --performance-only
 bash app/scripts/test.sh --switch-reveal-only
+bash app/scripts/test.sh --switching-duration-only
 ```
 
 可选系统集成入口：
@@ -654,3 +656,16 @@ AppDelegate 启动时先将当前确认状态传给标识，再开启全屏监�
 仅发布任务拥有 `contents: write`；构建任务为只读，checkout 不保留凭据，官方 Actions 固定到提交 SHA。无需个人令牌、Developer ID 证书或公证密钥。Actions 下载产物保留 30 天、测试日志 14 天，Release 附件供长期下载（除非手动删除）。下载与安装说明以 [根 README](../../README.md) 为入口。
 
 CI 不声明完成真实登录启动、所有 macOS 版本或硬件的人工验收；可选系统输入源、原生全屏和指针隐藏集成检查仍需在有交互桌面的本机单独执行。
+
+
+## 18. 切换提示停留时长（1.11.0）
+
+`Overlay.defaultDuration = 1`，有效范围 0.1–10 秒；`clampedDuration` 统一范围保护和 0.1 秒取整。`AppSettings.switchingPromptDuration` 使用同名 UserDefaults 键，缺失或损坏时回到默认值，写入忽略非有限值。旧版本无此配置，升级后自然采用 1 秒，不修改其他已有偏好。
+
+设置页在透明度下方增加秒数输入框与步进器。合法输入在回车或结束编辑时保存，越界或无效文本恢复旧值；相同量化值不重复保存/回调。关闭切换提示时联动禁用两个控件；恢复默认外观保留时长。预览前结束文本编辑，确保使用刚保存的数值。
+
+`AppDelegate` 在创建 Overlay 时传入保存值，`onSwitchingChange` 经 `applySwitchingSettings` 更新 `holdDuration`。每次 `show` 捕获当次时长，淡入完成后才安排 dismissal；修改设置只影响下一轮，既不延长也不截断正在显示的一轮。连续触发仍取消旧计时器，从当前 alpha 衔接，并采用新的时长快照；dismissal 回调额外核对计时器身份，避免过期回调关闭新提示。
+
+本配置仅控制中央提示，鼠标临时展示仍固定停留 0.5 秒，三种模式的动画时长不变。`SelfCheck` 按新的默认时长验证完整显示与淡出。专项入口 `--switching-duration-only` 覆盖默认1秒、持久化、重建读取、控件同步、输入校验、重复回调去重、禁用保留、手动预览、当前轮快照、连续触发与淡出反转；该专项同时纳入常规测试入口。
+
+本次验证：停留时长专项 33 项 PASS，常规回归 344 项 PASS，失败数均为 0；1.11.0 / 构建 29 的 release 构建与签名校验通过，产物位于 `dist/1.11.0/中英提示.app`。本轮未执行真实注销登录或全部硬件兼容验收。

@@ -7,15 +7,23 @@ final class PromptPanel: NSPanel {
 }
 
 final class Overlay {
-    static let duration: TimeInterval = 0.5
+    static let defaultDuration: TimeInterval = 1
+    static let durationRange: ClosedRange<Double> = 0.1...10
+    static func clampedDuration(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultDuration }
+        let bounded = min(durationRange.upperBound, max(durationRange.lowerBound, value))
+        return (bounded * 10).rounded() / 10
+    }
     static let fadeInDuration: TimeInterval = 0.12
     static let fadeDuration: TimeInterval = 0.18
     let panel: PromptPanel
     private let promptView: PromptView
     private var dismissal: Timer?
     private var fadeTimer: Timer?
+    private(set) var holdDuration: TimeInterval
 
-    init(backgroundOpacity: Double = 0.78) {
+    init(backgroundOpacity: Double = 0.78, holdDuration: TimeInterval = Overlay.defaultDuration) {
+        self.holdDuration = Self.clampedDuration(holdDuration)
         promptView = PromptView(backgroundOpacity: backgroundOpacity)
         let size = PromptView.size
         panel = PromptPanel(contentRect: NSRect(origin: .zero, size: size),
@@ -39,11 +47,18 @@ final class Overlay {
         promptView.updateBackgroundOpacity(opacity)
     }
 
+    func updateHoldDuration(_ duration: TimeInterval) {
+        guard duration.isFinite else { return }
+        holdDuration = Self.clampedDuration(duration)
+    }
+
     func show(_ source: InputSource) {
         show(InputState(source: source, capsLock: false))
     }
 
     func show(_ state: InputState) {
+        // Snapshot per presentation: editing settings never extends or cuts short an active prompt.
+        let duration = holdDuration
         let startingAlpha = panel.isVisible ? panel.alphaValue : 0
         cancelTimers()
         panel.alphaValue = startingAlpha
@@ -57,13 +72,14 @@ final class Overlay {
         }
         panel.orderFrontRegardless()
         animateAlpha(to: 1, duration: Self.fadeInDuration) { [weak self] in
-            self?.scheduleDismissal()
+            self?.scheduleDismissal(after: duration)
         }
     }
 
-    private func scheduleDismissal() {
-        let timer = Timer(timeInterval: Self.duration, repeats: false) { [weak self] _ in
-            self?.beginFade()
+    private func scheduleDismissal(after duration: TimeInterval) {
+        let timer = Timer(timeInterval: duration, repeats: false) { [weak self] timer in
+            guard let self, self.dismissal === timer else { return }
+            self.beginFade()
         }
         dismissal = timer
         RunLoop.main.add(timer, forMode: .common)

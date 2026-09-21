@@ -16,6 +16,11 @@ enum Tests {
 
     static func main() {
         NSApplication.shared.setActivationPolicy(.accessory)
+        if CommandLine.arguments.contains("--switching-duration-only") {
+            checkSwitchingPromptDuration()
+            print("切换提示停留时长专项完成，失败数：\(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
         if CommandLine.arguments.contains("--switch-reveal-only") {
             checkMouseInputChangeReveal()
             print("切换临时提示专项完成，失败数：\(failures)")
@@ -50,6 +55,7 @@ enum Tests {
         checkSourceBeforeCapsLock()
         checkCancelledCapsLockAndFinalReread()
         checkSettingsPersistenceAndControls()
+        checkSwitchingPromptDuration()
         checkLoginItemControls()
         checkFullScreenIndicator()
         checkFullScreenControls()
@@ -114,6 +120,119 @@ enum Tests {
         slider.doubleValue = 0
         slider.sendAction(slider.action, to: slider.target)
         check(settings.backgroundOpacity == 1, "0% 透明时保留完整系统材质")
+        controller.close()
+    }
+
+    private static func checkSwitchingPromptDuration() {
+        func wait(_ seconds: TimeInterval) { RunLoop.main.run(until: Date().addingTimeInterval(seconds)) }
+        let suite = "InputMethodPrompt.SwitchingDuration.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let settings = AppSettings(defaults: defaults)
+        let state = InputState(source: InputSource(id: "abc", name: "ABC", languages: ["en"]), capsLock: false)
+        let overlay = Overlay(holdDuration: settings.switchingPromptDuration)
+        var changes = 0
+        let controller = SettingsWindowController(settings: settings, loginItem: FakeLoginItem(),
+            onChange: { _ in }, onPreview: { overlay.show(state) }, onSwitchingChange: {
+                changes += 1
+                overlay.updateHoldDuration(settings.switchingPromptDuration)
+                if !settings.switchingPromptEnabled { overlay.hide() }
+            })
+        let views = descendants(of: controller.window!.contentView!)
+        let seconds = views.first { $0.identifier?.rawValue == "switchingPromptDuration" } as! NSTextField
+        let stepper = views.first { $0.identifier?.rawValue == "switchingPromptDurationStepper" } as! NSStepper
+        let toggle = views.first { $0.identifier?.rawValue == "switchingPromptEnabled" } as! NSSwitch
+        let preview = views.first { $0.identifier?.rawValue == "previewSwitchingPrompt" } as! NSButton
+        func input(_ text: String) {
+            seconds.stringValue = text
+            seconds.sendAction(seconds.action, to: seconds.target)
+        }
+        check(settings.switchingPromptDuration == 1 && overlay.holdDuration == 1 &&
+              seconds.doubleValue == 1 && stepper.doubleValue == 1,
+              "无停留时长配置时默认1秒，控件和实际浮层一致")
+        check(stepper.minValue == 0.1 && stepper.maxValue == 10 && stepper.increment == 0.1,
+              "停留时长支持0.1至10秒，步进0.1秒")
+        overlay.show(state)
+        wait(0.8)
+        check(overlay.panel.isVisible && overlay.panel.alphaValue == 1, "默认停留不再沿用旧0.5秒")
+        wait(0.65)
+        check(!overlay.panel.isVisible, "默认1秒停留后淡出隐藏")
+
+        input("0.4")
+        let reloaded = AppSettings(defaults: UserDefaults(suiteName: suite)!)
+        check(reloaded.switchingPromptDuration == 0.4 && stepper.doubleValue == 0.4 &&
+              overlay.holdDuration == 0.4 && changes == 1 && !overlay.panel.isVisible,
+              "输入秒数持久化并同步运行时，修改配置本身不弹窗")
+        let restarted = Overlay(holdDuration: reloaded.switchingPromptDuration)
+        check(restarted.holdDuration == 0.4, "重建浮层使用已保存时长")
+        preview.performClick(nil)
+        wait(0.03)
+        input("1.4")
+        wait(0.8)
+        check(!overlay.panel.isVisible, "淡入中修改时长不改变正在展示的一轮")
+        preview.performClick(nil)
+        wait(0.85)
+        check(overlay.panel.isVisible && overlay.panel.alphaValue == 1, "下次预览使用新停留时长")
+        overlay.show(state)
+        wait(0.85)
+        check(overlay.panel.isVisible && overlay.panel.alphaValue == 1, "连续触发重新计时，旧截止不能提前隐藏")
+        wait(0.85)
+        check(!overlay.panel.isVisible, "连续触发后按新截止淡出完成")
+
+        stepper.doubleValue = 0.2
+        stepper.sendAction(stepper.action, to: stepper.target)
+        check(seconds.doubleValue == 0.2 && settings.switchingPromptDuration == 0.2 && overlay.holdDuration == 0.2,
+              "步进器更新输入框、保存值和实际浮层")
+        overlay.show(state)
+        wait(0.40)
+        let alpha = overlay.panel.alphaValue
+        check(alpha > 0 && alpha < 1, "自定义短停留后仍执行淡出动画")
+        input("0.8")
+        overlay.show(state)
+        check(overlay.panel.alphaValue == alpha, "淡出中重新触发从当前透明度淡入")
+        wait(0.45)
+        check(overlay.panel.isVisible && overlay.panel.alphaValue == 1, "旧淡出不会隐藏使用新时长的提示")
+        overlay.hide()
+
+        input(" 1.26 ")
+        check(seconds.doubleValue == 1.3 && settings.switchingPromptDuration == 1.3, "输入自动取整到0.1秒")
+        let beforeUnchanged = changes
+        input("1.30")
+        controller.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: seconds))
+        check(changes == beforeUnchanged && seconds.stringValue == "1.3", "相同数值和重复结束编辑不重复回调")
+        seconds.stringValue = "2.5"
+        controller.controlTextDidEndEditing(Notification(name: NSControl.textDidEndEditingNotification, object: seconds))
+        check(settings.switchingPromptDuration == 2.5 && stepper.doubleValue == 2.5, "失去编辑焦点保存秒数")
+        for invalid in ["", "abc", "0", "-1", "10.1", "nan", "inf"] {
+            let before = changes
+            input(invalid)
+            check(settings.switchingPromptDuration == 2.5 && seconds.doubleValue == 2.5 && changes == before,
+                  "无效停留时长恢复已有值且不回调：\(invalid)")
+        }
+        (views.first { $0.identifier?.rawValue == "resetSwitchingAppearance" } as! NSButton).performClick(nil)
+        check(settings.switchingPromptDuration == 2.5 && settings.mouseIdleDelay == 3 &&
+              MouseIndicator.inputChangeDuration == 0.5, "外观重置保留时长，鼠标计时规则独立")
+        overlay.show(state)
+        toggle.state = .off
+        toggle.sendAction(toggle.action, to: toggle.target)
+        check(!seconds.isEnabled && !stepper.isEnabled && !overlay.panel.isVisible && settings.switchingPromptDuration == 2.5,
+              "关闭切换提示隐藏浮层、禁用时长控件且保留数值")
+        preview.performClick(nil)
+        check(overlay.panel.isVisible && overlay.holdDuration == 2.5, "关闭自动提示仍可按保存时长手动预览")
+        overlay.hide()
+        toggle.state = .on
+        toggle.sendAction(toggle.action, to: toggle.target)
+        check(seconds.isEnabled && stepper.isEnabled && seconds.doubleValue == 2.5, "重新开启恢复控件并保留时长")
+        settings.switchingPromptDuration = .infinity
+        check(settings.switchingPromptDuration == 2.5, "非有限值不会覆盖偏好")
+        defaults.set("broken", forKey: "switchingPromptDuration")
+        check(settings.switchingPromptDuration == 1, "错误类型的时长配置回到默认1秒")
+        defaults.set(Double.nan, forKey: "switchingPromptDuration")
+        check(settings.switchingPromptDuration == 1, "非有限时长配置回到默认1秒")
+        settings.switchingPromptDuration = 100
+        check(settings.switchingPromptDuration == 10, "存储时长上限10秒")
+        settings.switchingPromptDuration = 0
+        check(settings.switchingPromptDuration == 0.1, "存储时长下限0.1秒")
         controller.close()
     }
 
