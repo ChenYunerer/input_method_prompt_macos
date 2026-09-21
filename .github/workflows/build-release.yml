@@ -1,0 +1,82 @@
+name: Build and Release macOS
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    name: Build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x86_64
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify build environment
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          sw_vers
+          swift --version
+      - name: Run regression tests
+        run: |
+          mkdir -p app/.build/ci
+          bash app/scripts/test.sh 2>&1 | tee app/.build/ci/tests.log
+      - name: Build, sign and package
+        env:
+          CI_BUILD_ID: ${{ github.run_number }}.${{ github.run_attempt }}
+        run: bash app/scripts/package-release.sh
+      - name: Upload downloadable packages
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.arch }}
+          path: dist/releases/*
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-log-${{ matrix.arch }}
+          path: app/.build/ci/tests.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  release:
+    name: Publish downloads
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: dist/releases
+          merge-multiple: true
+      - name: Verify packages and publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          CI_BUILD_ID: ${{ github.run_number }}.${{ github.run_attempt }}
+        run: bash app/scripts/publish-release.sh
