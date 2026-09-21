@@ -2,11 +2,13 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 实现基线 | 当前工作区，应用 1.10.0 / 构建号 28 |
+| 实现基线 | 应用 1.10.0 / 构建号 28，源码提交 `e37acc2` |
 | 整理日期 | 2026-09-21 |
 | 需求基线 | [PRD](PRD.md) |
-| 基线形式 | 仓库尚无首次提交；依据实际源码和应用包整理，不引用不存在的 commit |
-| 本轮范围 | 鼠标标识隐藏/淡化时，输入状态变化临时展示并恢复 |
+| 源码仓库 | [ChenYunerer/input_method_prompt_macos](https://github.com/ChenYunerer/input_method_prompt_macos)，公开仓库，默认分支 `main` |
+| 本轮范围 | 同步当前设置、三种提示、临时展示、性能与稳定性机制，以及仓库和构建信息；仅更新文档 |
+
+第 1–14 节描述当前实现；第 15 节及第 16 节保留演进过程，版本标题下的旧行为仅用于解释改动。当前鼠标显示策略以第 16.9–16.12 节和 PRD 为准，验证记录注明其所属版本。
 
 ## 1. 方案概述
 
@@ -20,7 +22,7 @@ flowchart LR
     Flags["Caps Lock 状态\n80 ms 轮询"] --> Monitor
     Monitor --> Delegate["AppDelegate"]
     Delegate --> Mouse["MouseIndicator<br/>鼠标跟随提示"]
-    Settings -->|独立启用开关| Mouse
+    Settings -->|开关、大小、透明度、静止策略| Mouse
     Delegate --> Menu["菜单栏状态"]
     Delegate --> Persistent["FullScreenIndicator<br/>常驻标识与悬停淡化"]
     FullScreen["FullScreenMonitor<br/>全屏检测"] --> Persistent
@@ -37,10 +39,10 @@ flowchart LR
 
 ## 2. 工程结构与模块职责
 
-所有工程内容位于 `app/`，根目录保留入口说明与可运行产物。
+所有工程内容位于 `app/`，根目录保留入口说明与忽略的构建产物。下图以 GitHub 仓库名展示，现有本地目录名不受仓库更名影响。
 
 ```text
-macos_input_method_prompt/
+input_method_prompt_macos/
 ├── README.md
 ├── app/
 │   ├── Package.swift
@@ -59,10 +61,10 @@ macos_input_method_prompt/
 │   ├── Assets/AppIcon.png
 │   ├── Assets/README.md
 │   ├── scripts/{build-app,build-icon,test}.sh
-│   ├── docs/{PRD,TECHNICAL_DESIGN}.md
+│   ├── docs/{PRD,TECHNICAL_DESIGN,PERFORMANCE_STABILITY}.md
 │   ├── .build/                  # 当前构建缓存，不纳入 Git
 │   └── .build-previous/         # 目录整理前的缓存，不纳入 Git
-└── dist/中英提示.app
+└── dist/中英提示.app           # 默认输出，不纳入 Git
 ```
 
 | 模块 | 职责 | 对应需求 |
@@ -71,13 +73,13 @@ macos_input_method_prompt/
 | [InputSource.swift](../Sources/InputMethodPrompt/InputSource.swift) | 输入源读取、语言映射、Caps Lock、状态合并与确认 | R01、R04 |
 | [FullScreenIndicator.swift](../Sources/InputMethodPrompt/FullScreenIndicator.swift) | 全屏几何检测、通知与轮询、每屏常驻标识 | R09 |
 | [MouseFrameClock.swift](../Sources/InputMethodPrompt/MouseFrameClock.swift) | 窗口绑定的屏幕同步回调、刷新率适配、暂停与释放 | R11 |
-| [MouseIndicator.swift](../Sources/InputMethodPrompt/MouseIndicator.swift) | 鼠标移动事件合并、跨屏定位与边缘避让、独立非激活窗口 | R11 |
+| [MouseIndicator.swift](../Sources/InputMethodPrompt/MouseIndicator.swift) | 鼠标事件与帧调度、跨屏避让、静止/指针隐藏策略、临时展示、双向动画与资源清理 | R11 |
 | [Overlay.swift](../Sources/InputMethodPrompt/Overlay.swift) | 屏幕选择、非激活窗口、淡入/停留/淡出、计时取消 | R02、R03 |
 | [PromptView.swift](../Sources/InputMethodPrompt/PromptView.swift) | 中央提示视图、共用 PromptStyle 圆角规则、材质遮罩及文字呈现 | R02、R06、R09 |
-| [Settings.swift](../Sources/InputMethodPrompt/Settings.swift) | 透明度偏好、设置窗口、实时预览、登录项状态展示 | R06、R07 |
+| [Settings.swift](../Sources/InputMethodPrompt/Settings.swift) | 三组提示偏好、分类设置、实时预览、静止策略及登录项状态展示 | R06、R07、R09–R11 |
 | [LoginItem.swift](../Sources/InputMethodPrompt/LoginItem.swift) | 系统登录项适配及可替换测试接口 | R07 |
 | [SelfCheck.swift](../Sources/InputMethodPrompt/SelfCheck.swift) | 实际浮层动画及前台应用保持检查 | R02、R03 |
-| [InputMethodPromptTests.swift](../Tests/InputMethodPromptTests.swift) | 自定义测试入口、状态回归、偏好和控件测试 | R01–R07、R09 |
+| [InputMethodPromptTests.swift](../Tests/InputMethodPromptTests.swift) | 自定义测试入口、状态/调度/生命周期回归、偏好和控件、可选系统集成测试 | R01–R07、R09–R11 |
 | [build-icon.sh](../scripts/build-icon.sh) | 源图缩放与图标包生成 | R08 |
 
 ## 3. 生命周期与模块装配
@@ -119,13 +121,13 @@ macos_input_method_prompt/
 | 输入源变更 | `kTISNotifySelectedKeyboardInputSourceChanged`，通过分布式通知中心监听 |
 | Caps Lock | `CGEventSource.flagsState(.combinedSessionState).contains(.maskAlphaShift)` |
 
-Caps Lock 每 80 ms 读取一次，定时器容差 15 ms。只有读到的锁定标志与当前确认状态不同，才调用完整状态刷新。输入源通知则切回主队列，调用同一个刷新入口。
+Caps Lock 每 80 ms 读取一次，定时器容差 15 ms。只有锁定标志与最近观测值 `lastObservedCapsLock` 不同，才读取完整状态，避免确认窗口内反复读取 TIS。输入源通知切到主队列，并通过 `refreshScheduled` 合并同一轮通知，再调用同一个刷新入口。
 
 程序不安装键盘事件拦截器，不修改按键，不读取输入文本。输入源和修饰键是分别读取的，不构成原子快照，因此需要下一节的状态确认。
 
 ### 4.3 读取失败
 
-缺失输入源、ID 或名称时返回 `nil`；语言缺失则使用空数组。刷新读不到完整状态时取消候选计时，不发布新的状态；已有确认状态继续保留。冷启动时没有确认状态，菜单栏显示无法读取，浮层不展示伪造结果。
+缺失输入源、ID 或名称时返回 `nil`；语言缺失则使用空数组。刷新读不到完整状态时取消候选计时，不发布新的状态；已有确认状态继续保留。冷启动时没有确认状态，菜单栏显示无法读取，浮层不展示伪造结果。读取失败时安排唯一的 0.5 秒单次恢复计时器（容差 0.05 秒）；持续失败继续安排下一次，成功即取消，再走正常确认流程。对象释放时取消恢复和确认计时器。
 
 ## 5. 状态合并与短暂大写标志修复
 
@@ -204,7 +206,7 @@ stateDiagram-v2
 
 `PromptView` 由浮层及设置窗口内预览共用。尺寸 148 × 148 pt，使用 `.hudWindow` 系统材质。浮层采用 `.behindWindow` 混合，设置预览采用 `.withinWindow` 混合，因此预览的实际背景取样不同；「预览切换提示」用于确认真实场景。
 
-此前单用图层圆角产生毛玻璃直角外框。现在通过 `NSVisualEffectView.maskImage` 裁剪材质；1.7.3 中央与常驻窗口均关闭 `hasShadow`。中央提示的圆角半径为 24 pt；两个提示视图共同调用 `PromptStyle.cornerRadius(for:)`，按短边的 24/148 计算实际半径，常驻缩放时保持相同比例。
+此前单用图层圆角产生毛玻璃直角外框。现在通过 `NSVisualEffectView.maskImage` 裁剪材质；1.7.3 中央与常驻窗口均关闭 `hasShadow`。中央提示的圆角半径为 24 pt；三种提示视图共同调用 `PromptStyle.cornerRadius(for:)`，按短边的 24/148 计算实际半径，常驻缩放时保持相同比例。
 
 透明度的两个层次分别是：
 
@@ -219,15 +221,23 @@ stateDiagram-v2
 
 ### 8.1 存储
 
-| 配置 | 保存位置 | 默认与约束 |
+以下 11 项保存在 `UserDefaults.standard`，名称为实际存储键：
+
+| 配置键 | 默认值 | 约束与影响范围 |
 | --- | --- | --- |
-| `backgroundTransparency` | `UserDefaults.standard` | 默认 0.22；有效范围 `[0,1]`；UI 按整数百分比保存 |
-| `mouseIndicatorEnabled` | `UserDefaults.standard` | 默认开启，独立保存 |
-| `mouseScale` | `UserDefaults.standard` | 默认 1.0，范围 0.5–3.0，UI 步进 0.05 |
-| `mouseTransparency` | `UserDefaults.standard` | 默认 0.5，范围 0–1，UI 按整数百分比保存；作用于整窗 |
-| 自动启动 | macOS 登录项服务 | 每次读取实际状态，没有本地布尔值替代系统状态 |
-| 切换提示启用状态 | `UserDefaults.standard` 中的 `switchingPromptEnabled` | 默认开启，退出后保留 |
-| 中央提示位置和动画参数 | 当前源码常量 | 无用户配置入口 |
+| `switchingPromptEnabled` | `true` | 中央自动提示，手动预览不受限 |
+| `backgroundTransparency` | `0.22` | 0–1，UI 整数百分比，仅影响中央背景 |
+| `fullScreenIndicatorEnabled` | `true` | 全屏常驻开关 |
+| `fullScreenTransparency` | `0.45` | 0–1，UI 整数百分比，仅影响常驻背景 |
+| `fullScreenScale` | `1.0` | 0.75–5.0，UI 步进 0.05 |
+| `fullScreenPosition` | `topRight` | 九宫格枚举，非法值回到右上 |
+| `mouseIndicatorEnabled` | `true` | 鼠标跟随开关 |
+| `mouseTransparency` | `0.5` | 0–1，UI 整数百分比，作用于整窗 |
+| `mouseScale` | `1.0` | 0.5–3.0，UI 步进 0.05 |
+| `mouseIdleDelay` | `3` | 1–60 秒，取整；按已静止时长即时重新判断 |
+| `mouseIdleBehavior` | `hide` | `hide` / `fade`，非法值回到隐藏 |
+
+自动启动直接读取 macOS 登录项服务，不保存本地布尔副本。中央位置、动画时间、鼠标临时展示停留 0.5 秒及静止淡化因子 0.2 均为源码常量，没有用户配置入口。
 
 透明度 getter 对缺失或非有限值使用默认值，对超范围值截取边界；setter 忽略非有限值并限制范围。`0` 是合法保存值，不被当作缺省值。
 
@@ -237,7 +247,9 @@ stateDiagram-v2
 
 设置窗口为 560 × 480 pt 的固定尺寸普通窗口。它按需创建后复用；关闭窗口不终止应用。`present()` 刷新配置与登录状态并激活窗口，窗口再次成为 key window 时重新读取登录项状态。
 
-「预览切换提示」回调进入现有浮层展示逻辑；各组「恢复默认外观」只重置本组外观，不更改启用开关和登录项。
+设置分为「切换提示 / 全屏常驻 / 鼠标跟随 / 通用」。`onChange` 更新中央背景，`onFullScreenChange` 更新常驻外观、位置和监测开关，`onMouseChange` 经 `AppDelegate.applyMouseSettings` 同步大小、整体透明度、静止秒数、行为及启用状态。只刷新被修改的分类，滑块量化后与旧值相同时跳过写入与回调。
+
+「预览切换提示」回调进入现有浮层展示逻辑。中央重置仅恢复透明度；全屏重置大小和透明度、不重置位置；鼠标重置大小和透明度、不重置静止秒数及行为。所有外观重置均不更改启用开关和登录项。
 
 ## 9. 登录时自动启动
 
@@ -267,7 +279,7 @@ stateDiagram-v2
 
 `build-icon.sh` 使用 `sips` 生成十种命名表示（16/32/128/256/512 pt 的 1×、2×，最大 1024 px），使用 `iconutil` 生成 `.icns`，缓存写入 `app/.build/`。
 
-`build-app.sh` 顺序执行图标生成、Swift release 构建、应用包组装、Info.plist 生成、本机临时签名和签名校验。当前产物：
+`build-app.sh` 顺序执行图标生成、Swift release 构建、应用包组装、Info.plist 生成、本机临时签名和签名校验。默认输出结构：
 
 ```text
 dist/中英提示.app/Contents/
@@ -277,7 +289,7 @@ dist/中英提示.app/Contents/
 └── _CodeSignature/…
 ```
 
-关键元数据：Bundle ID `local.yun.InputMethodPrompt`，版本 `1.5.2`，构建号 `15`，最低系统 `13.0`，`CFBundleIconFile=AppIcon.icns`。构建使用当前机器架构，未输出 Universal 二进制。
+关键元数据：Bundle ID `local.yun.InputMethodPrompt`，版本 `1.10.0`，构建号 `28`，最低系统 `13.0`，`CFBundleIconFile=AppIcon.icns`。构建使用当前机器架构，未输出 Universal 二进制。
 
 命令从项目根目录执行：
 
@@ -288,13 +300,23 @@ bash app/scripts/test.sh
 "dist/中英提示.app/Contents/MacOS/InputMethodPrompt" --diagnose
 ```
 
-构建脚本会直接更新固定 `dist/` 产物。已有操作流程是在替换应用包前退出旧进程，完成后重新打开；脚本本身没有自动停止运行进程或完整的版本回滚机制。临时签名不等于 Developer ID 签名或 Apple 公证，不承诺在其他机器上的无提示分发体验。
+默认输出为 `dist/中英提示.app`；可通过 `INPUT_PROMPT_APP_DIR` 指定完整 `.app` 路径。例如保留版本化产物：
+
+```sh
+INPUT_PROMPT_APP_DIR="$PWD/dist/1.10.0/中英提示.app" bash app/scripts/build-app.sh
+```
+
+脚本先在输出所在文件系统创建临时目录，完成打包和验签后才替换旧包；替换失败时尝试恢复旧包。按输出路径加目录锁，拒绝同目标并发构建。输出不是普通 `.app` 目录或存在符号链接时拒绝覆盖；回滚目标被其他进程占用时保留备份供核对。SIGKILL 或断电无法执行清理，可能遗留锁或备份。
+
+脚本不自动退出或重新启动运行中的应用。临时签名不等于 Developer ID 签名或 Apple 公证，当前没有 GitHub Release 安装包、自动更新或跨架构 Universal 构建流程。
+
+公开仓库仅维护源码、测试、脚本、图标源文件和文档。`.gitignore` 排除 `.build/`、`.build-previous/`、`dist/` 和 `.DS_Store`；仓库更名不改变应用名、Bundle ID 或本地偏好域。
 
 ## 11. 验证依据
 
 ### 11.1 已有证据
 
-历史基线在 macOS 15.7.9、arm64 上验证。1.5.1 已执行完整回归。1.5.2 圆角调整已通过 release 构建与签名校验，已核对共用公式及两处调用，未重跑完整回归；下表原有能力的结果来自此前及本次真实工具回执，全屏新增验证另见第 14 节。
+当前 1.10.0 / 构建 28 的历史回执：常规及真实指针回归 311 项通过，临时展示专项通过，release 构建与签名校验通过。测试环境为 macOS 15.7.9、Apple Silicon。1.9.1 的性能专项、原生全屏 6 项及构建失败回滚验证见 [专项记录](PERFORMANCE_STABILITY.md)。本次只更新文档，未重新执行这些运行时测试；下表保留各项既有证据的边界。
 
 | 验证方式 | 已证实内容 | 不能据此推断 |
 | --- | --- | --- |
@@ -311,13 +333,31 @@ bash app/scripts/test.sh
 
 透明度测试使用唯一的 UserDefaults suite 并清理测试域，不覆盖用户保存的设置。登录项测试使用 fake service。真实输入源测试默认关闭，显式设置环境变量才执行，并在结束时尝试恢复原输入源。
 
+常规和专项入口（从仓库根目录执行）：
+
+```sh
+bash app/scripts/test.sh
+bash app/scripts/test.sh --performance-only
+bash app/scripts/test.sh --switch-reveal-only
+```
+
+可选系统集成入口：
+
+```sh
+TEST_CURSOR_VISIBILITY=1 bash app/scripts/test.sh
+TEST_FULLSCREEN=1 bash app/scripts/test.sh
+TEST_SYSTEM_INPUT_SWITCH=1 bash app/scripts/test.sh
+```
+
+后三项分别会短暂隐藏/恢复真实指针、切换测试窗口全屏、切换系统输入源；需要对应的图形登录会话，不把无界面编译成功等同于这些集成验收通过。
+
 ### 11.3 尚需实测
 
 1. 真实系统登录项注册与取消、系统批准流程及注销/重新登录。
 2. 物理 Caps Lock 短按、长按、快速连按，以及启用“Caps Lock 切换中英文”时的组合时序。
 3. 多屏、屏幕热插拔、全屏应用、不同 Space、唤醒后的表现。
 4. macOS 13/14、Intel 机器及其他输入法。
-5. 长时间运行的 CPU、内存、定时器唤醒和能耗；目前没有量化性能结论。
+5. 长时间运行的 CPU、内存、定时器唤醒和能耗；已有重复样式与调度微基准，但尚无整机性能或端到端延迟的量化结论。
 
 ## 12. 维护约束与后续边界
 
@@ -325,7 +365,7 @@ bash app/scripts/test.sh
 - 改状态识别时同步检查中间态过滤与 Caps Lock 保留测试；不能只按显示字符去重。
 - 改动画时验证可取消性与透明度连续性，避免过期回调关闭新提示。
 - 登录项的成功状态由系统确认，不能通过本地布尔值或 UI 开关状态冒充。
-- 工程文件继续放在 `app/`；产物保持 `dist/中英提示.app`，避免不必要地改变已有应用路径。
+- 工程文件继续放在 `app/`；默认产物为 `dist/中英提示.app`，自定义输出使用 `INPUT_PROMPT_APP_DIR`；不要把构建缓存和产物纳入源码提交。
 - 自由拖拽位置、第三方输入法内部模式和正式分发属于后续需求，不在当前代码中承诺实现。
 
 ## 13. 平台参考
@@ -578,3 +618,26 @@ AppDelegate 启动时先将当前确认状态传给标识，再开启全屏监�
 计时器使用弱引用和实例身份检查，连续切换替换旧截止。`stopTracking` 统一取消，关闭/全透明/状态失效/析构后旧回调不会重现图标。测试入口 `bash app/scripts/test.sh --switch-reveal-only` 覆盖停留、连续切换、无变化不续期、静止计时保留、指针隐藏优先级例外、移动、淡化恢复与资源清理。
 
 1.10.0 验证：常规及真实指针回归 311 项通过，临时展示专项通过；另覆盖到期淡出中再次切换平滑反转、展示中改为淡化、延长时长后不按旧策略隐藏。release 构建与签名校验通过。
+
+
+### 16.12 当前显示优先级与恢复过程
+
+`tracking` 仅在跟随开启、`state != nil`、`baseOpacity > 0` 时运行。有效屏幕决定 `lastOrigin` 是否存在。`applyVisibility` 的目标不透明度为：
+
+| 条件（按优先级） | 目标 alpha |
+| --- | --- |
+| 未启用、状态失效、全透明 | 停止跟随并淡出到 0，取消临时展示计时器 |
+| 无有效屏幕 / `lastOrigin == nil` | 0；定位失败时立即撤下窗口 |
+| `inputChangeTimer != nil` | `baseOpacity` |
+| `cursorVisible == false` | 0 |
+| 已静止且 `mouseIdleBehavior == .hide` | 0 |
+| 已静止且 `mouseIdleBehavior == .fade` | `baseOpacity * 0.2` |
+| 其他 | `baseOpacity` |
+
+`baseOpacity = 1 - mouseTransparency`，与背景固定 0.55 的填充 alpha 分开。预览展示正常外观，不随真实指针进入隐藏、淡化或临时展示状态。
+
+临时展示在需要增亮时安排 `0.12 + 0.5` 秒单次计时器，已在正常亮度时仅安排 0.5 秒。它与动画计时器独立；到期调用 `refreshVisibility()` 重新读取指针可见性，并计算最新静止策略。首次初始化或相同 `InputState` 不触发；连续确认变化替换旧计时器，通过对象身份校验阻止旧截止生效。计时基于 RunLoop 调度，不承诺严格实时精度。
+
+只有实际鼠标坐标改变才更新 `lastMovementTime`；输入变化本身、大小变化和强制定位不伪造移动。展示期间的真实移动或静止设置修改会影响到期后的判断，不强制恢复先前的隐藏状态。
+
+静止隐藏且动画结束后，只有临时展示计时器为空时才暂停可见性查询和帧回调；事件监听仍保留以便下一次移动唤醒。临时展示重新启用所需检测，到期再次完全隐藏后暂停。关闭、全透明、状态失效及析构统一取消临时计时器；无有效屏幕时即使计时器仍在，也不会显示窗口。
