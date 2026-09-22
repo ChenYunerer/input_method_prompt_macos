@@ -16,6 +16,26 @@ enum Tests {
 
     static func main() {
         NSApplication.shared.setActivationPolicy(.accessory)
+        if CommandLine.arguments.contains("--input-state-only") {
+            checkInputStateReconciliation()
+            checkInputStateLifecycleAndModes()
+            checkInputMonitorRecovery()
+            checkCapsLockAfterWindowClick()
+            checkUnavailableCapsLock()
+            print("输入状态专项完成，失败数：\(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
+        if CommandLine.arguments.contains("--caps-lock-only") {
+            checkCapsLockReader()
+            checkCapsLockAfterWindowClick()
+            checkUnavailableCapsLock()
+            checkCapsLockChanges(InputSource(id: "abc", name: "ABC", languages: ["en"]))
+            checkTransientCapsLockDuringSourceSwitch()
+            checkSourceBeforeCapsLock()
+            checkCancelledCapsLockAndFinalReread()
+            print("大写锁定专项完成，失败数：\(failures)")
+            exit(failures == 0 ? 0 : 1)
+        }
         if CommandLine.arguments.contains("--switching-duration-only") {
             checkSwitchingPromptDuration()
             print("切换提示停留时长专项完成，失败数：\(failures)")
@@ -54,6 +74,9 @@ enum Tests {
         checkTransientCapsLockDuringSourceSwitch()
         checkSourceBeforeCapsLock()
         checkCancelledCapsLockAndFinalReread()
+        checkCapsLockReader()
+        checkCapsLockAfterWindowClick()
+        checkUnavailableCapsLock()
         checkSettingsPersistenceAndControls()
         checkSwitchingPromptDuration()
         checkLoginItemControls()
@@ -73,6 +96,8 @@ enum Tests {
         checkFullScreenMonitorLifecycle()
         checkMouseIdlePollingLifecycle()
         checkInputMonitorRecovery()
+        checkInputStateReconciliation()
+        checkInputStateLifecycleAndModes()
         if ProcessInfo.processInfo.environment["TEST_CURSOR_VISIBILITY"] == "1" { checkSystemCursorVisibility() }
         if ProcessInfo.processInfo.environment["TEST_FULLSCREEN"] == "1" { checkNativeFullScreen() }
         if ProcessInfo.processInfo.environment["TEST_SYSTEM_INPUT_SWITCH"] == "1" {
@@ -80,6 +105,133 @@ enum Tests {
         }
         print("全部测试完成，失败数：\(failures)")
         exit(failures == 0 ? 0 : 1)
+    }
+
+    private static func checkCapsLockReader() {
+        var states: [Bool?]? = [false, false, false]
+        let reader = CapsLockReader(readKeyboardStates: { states })
+        check(reader.read() == false, "三个键盘均关闭时报告小写")
+        // 2026-09-22 16:02:13: only the external keyboard reported true.
+        states = [false, false, true]
+        check(reader.read() == true, "外接键盘真正开启大写时，不被其他空闲键盘的关闭状态否决")
+        states = [true, false, false]
+        check(reader.read() == true, "不依赖键盘品牌、顺序或名称")
+        states = [false, true, true]
+        check(reader.read() == true, "多键盘同时锁定时仍识别大写")
+        states = [false, false]
+        check(reader.read() == false, "移除锁定键盘后不保留已断开的状态")
+        states = [true]
+        check(reader.read() == true, "热插拔后读取新键盘状态")
+        states = []
+        check(reader.read() == nil, "没有可读键盘时返回未知")
+        states = nil
+        check(reader.read() == nil, "服务枚举失败时返回未知")
+        states = [nil]
+        check(reader.read() == nil, "缺失的锁定属性不冒充关闭")
+        states = [false, nil]
+        check(reader.read() == nil, "部分键盘不可读且无已开启键盘时不猜测整体状态")
+        states = [nil, true]
+        check(reader.read() == true, "已确认开启的键盘足以确认大写，无需猜测其他键盘")
+        states = [false, false, false]
+        check(reader.read() == false, "服务恢复后重新读取，不缓存失败结果")
+        check(CapsLockReader.readBoolean(kCFBooleanTrue) == true &&
+              CapsLockReader.readBoolean(kCFBooleanFalse) == false, "接受系统契约中的 CFBoolean 属性")
+        for property: CFTypeRef? in [nil, NSNumber(value: 1), NSNumber(value: 0), "true" as CFString] {
+            check(CapsLockReader.readBoolean(property) == nil, "缺失或非布尔属性不强制转换为锁定状态")
+        }
+
+        // Captured while the user confirmed Caps Lock was off. The old reader
+        // accepted both legacy flags being true; all keyboard services were off.
+        let eventCaps = true
+        let legacyLock = true
+        check(eventCaps && legacyLock && reader.read() == false,
+              "16:02:38 实测：两个旧接口同时误报开启，键盘属性全关时仍返回关闭")
+    }
+
+    private static func checkCapsLockAfterWindowClick() {
+        var states: [Bool?] = [false, false, false]
+        var source = InputSource(id: "abc", name: "ABC", languages: ["en"])
+        let reader = CapsLockReader(readKeyboardStates: { states })
+        let notifications = NotificationCenter()
+        let monitor = InputSourceMonitor(readState: {
+            guard let capsLock = reader.read() else { return nil }
+            return InputState(source: source, capsLock: capsLock)
+        }, readCapsLock: { reader.read() }, sourceNotifications: NotificationCenter(), workspaceNotifications: notifications)
+        var symbols: [String] = []
+        monitor.onChange = { symbols.append($0.symbol) }
+
+        // The real 16:02:12 trace contains a 53 ms Caps pulse before activation;
+        // language switching also produced pulses shorter than 125 ms.
+        states[2] = true
+        monitor.refresh()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.12))
+        states[2] = false
+        monitor.refresh()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check(symbols.isEmpty, "键盘服务短暂开启后恢复时，不将中英切换的中间态显示为 A")
+        states[2] = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.45))
+        check(symbols == ["A"], "英文下长按中英键开启真实大写，正常提示 A")
+        // Actual turn-off included a brief false -> true bounce before settling.
+        states[2] = false
+        monitor.refresh()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+        states[2] = true
+        monitor.refresh()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.07))
+        states[2] = false
+        monitor.refresh()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.30))
+        check(symbols == ["A", "a"], "短按中英键关闭大写的短暂反跳合并后只恢复一次 a")
+        // After the real turn-off, event flags and legacy IOHID lock both became
+        // true while all service properties stayed false. Neither legacy API is
+        // an input to this reader, including on every restored P0 refresh path.
+        monitor.refresh()
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification,
+                     NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            notifications.post(name: name, object: nil)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            check(symbols == ["A", "a"], "关闭大写后的生命周期刷新不重发 A：\(name.rawValue)")
+        }
+        RunLoop.main.run(until: Date().addingTimeInterval(2.3))
+        check(symbols == ["A", "a"] && monitor.current?.capsLock == false,
+              "关闭后键盘属性持续 3.8 秒为关，周期校准与生命周期刷新不重发大写")
+        source = InputSource(id: "pinyin", name: "拼音", languages: ["zh-Hans"])
+        monitor.refresh()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+        check(symbols == ["A", "a", "中"], "焦点切换同时变更输入源时，仍展示正确语言")
+        states[0] = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.45))
+        check(symbols.last == "A" && symbols.count == 4, "换另一键盘真正开启锁定时仍能发现变化")
+        states[0] = false
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check(symbols.last == "中" && symbols.count == 5, "关闭真实锁定后恢复中文")
+    }
+
+    private static func checkUnavailableCapsLock() {
+        let source = InputSource(id: "abc", name: "ABC", languages: ["en"])
+        var locked: Bool? = false
+        var reads = 0
+        let monitor = InputSourceMonitor(readState: {
+            reads += 1
+            return locked.map { InputState(source: source, capsLock: $0) }
+        }, readCapsLock: { locked }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter())
+        var symbols: [String] = []
+        monitor.onChange = { symbols.append($0.symbol) }
+        locked = true
+        monitor.refresh()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.10))
+        locked = nil
+        RunLoop.main.run(until: Date().addingTimeInterval(0.30))
+        check(symbols.isEmpty && monitor.current?.capsLock == false,
+              "确认窗口内锁定状态不可用时取消待显示的大写")
+        let readsBefore = reads
+        RunLoop.main.run(until: Date().addingTimeInterval(0.65))
+        check(reads - readsBefore <= 2, "锁定读取失败只低频恢复，不每次轮询读取 TIS")
+        locked = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.5))
+        check(symbols == ["A"], "锁定接口恢复后可确认真实大写状态")
     }
 
     private static func checkSettingsPersistenceAndControls() {
@@ -1152,6 +1304,108 @@ enum Tests {
         check(released == nil && !panel.isVisible, "临时计时器不持有对象，销毁后无残留窗口")
     }
 
+    private static func checkInputStateReconciliation() {
+        let chinese = InputState(source: InputSource(id: "test.zh", name: "Chinese", languages: ["zh"]), capsLock: false)
+        let english = InputState(source: InputSource(id: "test.en", name: "English", languages: ["en"]), capsLock: false)
+        var state = chinese
+        let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { false }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter())
+        var events: [InputState] = []
+        monitor.onChange = { events.append($0) }
+        // Deliberately change the source without a notification or modifier edge.
+        state = english
+        RunLoop.main.run(until: Date().addingTimeInterval(2.5))
+        check(monitor.current == english && events == [english], "漏收输入源通知、Caps 不变时自动纠正旧中文状态")
+    }
+
+    private static func checkInputStateLifecycleAndModes() {
+        let chinese = InputState(source: InputSource(id: "test.zh", name: "Chinese", languages: ["zh"]), capsLock: false)
+        let english = InputState(source: InputSource(id: "test.en", name: "English", languages: ["en"]), capsLock: false)
+        func wait(_ interval: Double) { RunLoop.main.run(until: Date().addingTimeInterval(interval)) }
+        let notifications = NotificationCenter()
+        let sourceNotifications = NotificationCenter()
+        let sourceChanged = Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String)
+        let triggers = [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification,
+                        NSWorkspace.didWakeNotification, NSWorkspace.screensDidWakeNotification,
+                        NSWorkspace.sessionDidBecomeActiveNotification]
+        do {
+            var state = chinese
+            var reads = 0
+            let monitor = InputSourceMonitor(readState: { reads += 1; return state }, readCapsLock: { false },
+                                             sourceNotifications: sourceNotifications, workspaceNotifications: notifications, reconciliationInterval: 60)
+            var events: [InputState] = []
+            monitor.onChange = { events.append($0) }
+            for trigger in triggers {
+                state = state == chinese ? english : chinese
+                let before = events.count
+                notifications.post(name: trigger, object: nil)
+                wait(0.18)
+                check(monitor.current == state && events.count == before + 1, "生命周期通知重新确认输入状态：\(trigger.rawValue)")
+            }
+            let beforeReads = reads
+            let beforeEvents = events.count
+            for _ in 0..<20 {
+                for trigger in triggers { notifications.post(name: trigger, object: nil) }
+                sourceNotifications.post(name: sourceChanged, object: nil)
+            }
+            wait(0.04)
+            check(reads == beforeReads + 1 && events.count == beforeEvents, "混合系统通知合并读取，相同状态不重复弹窗")
+            state = chinese
+            DispatchQueue.global().async { notifications.post(name: NSWorkspace.didWakeNotification, object: nil) }
+            wait(0.25)
+            check(monitor.current == chinese && events.count == beforeEvents + 1, "后台线程通知回主线程确认状态")
+        }
+        do {
+            var state = chinese
+            var reads = 0
+            let monitor = InputSourceMonitor(readState: { reads += 1; return state }, readCapsLock: { state.capsLock },
+                                             sourceNotifications: sourceNotifications, workspaceNotifications: notifications, reconciliationInterval: 0.15)
+            var events: [InputState] = []
+            monitor.onChange = { events.append($0) }
+            wait(0.38)
+            check(reads >= 3 && reads <= 4 && events.isEmpty, "低频校准不重复发布稳定状态")
+            state = InputState(source: english.source, capsLock: true)
+            monitor.refresh()
+            wait(0.10)
+            state = english
+            wait(0.35)
+            check(events == [english], "校准与 Caps 轮询交错也不发布短暂 A")
+            state = InputState(source: english.source, capsLock: true)
+            monitor.refresh()
+            wait(0.32)
+            check(events.last?.symbol == "A" && events.count == 2, "校准周期短于确认窗口也不延后真实 Caps Lock")
+        }
+        do {
+            let mode1 = InputSource(id: "test.same", name: "模式", languages: ["zh"], inputModeID: "mode.1")
+            let mode2 = InputSource(id: "test.same", name: "模式", languages: ["zh"], inputModeID: "mode.2")
+            var state = InputState(source: mode1, capsLock: false)
+            let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { false },
+                                             sourceNotifications: sourceNotifications, workspaceNotifications: notifications, reconciliationInterval: 0.15)
+            var events: [InputState] = []
+            monitor.onChange = { events.append($0) }
+            state = InputState(source: mode2, capsLock: false)
+            wait(0.35)
+            check(monitor.current == state && events == [state], "输入源 ID 不变时仍识别系统公开的模式 ID 变化")
+        }
+        var readsAfterRelease = 0
+        weak var released: InputSourceMonitor?
+        autoreleasepool {
+            let monitor = InputSourceMonitor(readState: { readsAfterRelease += 1; return english }, readCapsLock: { false },
+                                             sourceNotifications: sourceNotifications, workspaceNotifications: notifications, reconciliationInterval: 0.10)
+            released = monitor
+            notifications.post(name: NSWorkspace.didWakeNotification, object: nil)
+        }
+        let baseline = readsAfterRelease
+        sourceNotifications.post(name: sourceChanged, object: nil)
+        notifications.post(name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        wait(0.35)
+        check(released == nil && readsAfterRelease == baseline, "销毁后取消校准、系统观察者和已排队刷新")
+
+        check(InputSource(id: "test.unknown", name: "未知", languages: ["zh"], inputModeID: "vendor.English").symbol == "中",
+              "不通过模式 ID 字符串猜测未公开的英文状态")
+        check(InputSource(id: "test.no-mode", name: "未提供模式", languages: ["zh"]).inputModeID == nil,
+              "系统未公开模式 ID 时保留缺失状态")
+    }
+
     private static func checkInputMonitorRecovery() {
         let english = InputSource(id: "test.en", name: "English", languages: ["en"])
         let chinese = InputSource(id: "test.zh", name: "Chinese", languages: ["zh"])
@@ -1159,7 +1413,7 @@ enum Tests {
         do {
             var state = InputState(source: english, capsLock: false)
             var reads = 0
-            let monitor = InputSourceMonitor(readState: { reads += 1; return state }, readCapsLock: { state.capsLock })
+            let monitor = InputSourceMonitor(readState: { reads += 1; return state }, readCapsLock: { state.capsLock }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter(), reconciliationInterval: 60)
             var events: [InputState] = []
             monitor.onChange = { events.append($0) }
             waitForMonitor(0.25)
@@ -1179,7 +1433,7 @@ enum Tests {
         do {
             var state: InputState? = InputState(source: english, capsLock: false)
             var reads = 0
-            let monitor = InputSourceMonitor(readState: { reads += 1; return state }, readCapsLock: { false })
+            let monitor = InputSourceMonitor(readState: { reads += 1; return state }, readCapsLock: { false }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter(), reconciliationInterval: 60)
             var events: [InputState] = []
             monitor.onChange = { events.append($0) }
             state = nil
@@ -1193,7 +1447,7 @@ enum Tests {
 
         do {
             var state: InputState? = InputState(source: english, capsLock: false)
-            let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { false })
+            let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { false }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter(), reconciliationInterval: 60)
             var events: [InputState] = []
             monitor.onChange = { events.append($0) }
             state = InputState(source: chinese, capsLock: false)
@@ -1209,7 +1463,7 @@ enum Tests {
         do {
             var state: InputState? = nil
             var reads = 0
-            let monitor = InputSourceMonitor(readState: { reads += 1; return state }, readCapsLock: { false })
+            let monitor = InputSourceMonitor(readState: { reads += 1; return state }, readCapsLock: { false }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter(), reconciliationInterval: 60)
             var events: [InputState] = []
             monitor.onChange = { events.append($0) }
             waitForMonitor(0.3)
@@ -1221,7 +1475,7 @@ enum Tests {
 
         do {
             var state = InputState(source: chinese, capsLock: false)
-            let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock })
+            let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter(), reconciliationInterval: 60)
             var symbols: [String] = []
             monitor.onChange = { symbols.append($0.symbol) }
             state = InputState(source: chinese, capsLock: true)
@@ -1238,7 +1492,7 @@ enum Tests {
 
         do {
             var state = InputState(source: chinese, capsLock: false)
-            let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock })
+            let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter(), reconciliationInterval: 60)
             var symbols: [String] = []
             monitor.onChange = { symbols.append($0.symbol) }
             state = InputState(source: english, capsLock: false)
@@ -1256,7 +1510,7 @@ enum Tests {
         weak var released: InputSourceMonitor?
         var deadReads = 0
         autoreleasepool {
-            let monitor = InputSourceMonitor(readState: { deadReads += 1; return nil }, readCapsLock: { false })
+            let monitor = InputSourceMonitor(readState: { deadReads += 1; return nil }, readCapsLock: { false }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter(), reconciliationInterval: 60)
             released = monitor
             monitor.perform(NSSelectorFromString("sourceChanged"))
         }
@@ -1657,7 +1911,7 @@ enum Tests {
         var capsLock = false
         let monitor = InputSourceMonitor(
             readState: { InputState(source: source, capsLock: capsLock) },
-            readCapsLock: { capsLock }
+            readCapsLock: { capsLock }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter()
         )
         var observed: [InputState] = []
         monitor.onChange = { observed.append($0) }
@@ -1679,7 +1933,7 @@ enum Tests {
         let chinese = InputSource(id: "pinyin", name: "拼音", languages: ["zh-Hans"])
         let english = InputSource(id: "abc", name: "ABC", languages: ["en"])
         var state = InputState(source: chinese, capsLock: false)
-        let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock })
+        let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter())
         var symbols: [String] = []
         monitor.onChange = { symbols.append($0.symbol) }
 
@@ -1700,7 +1954,7 @@ enum Tests {
         let chinese = InputSource(id: "pinyin", name: "拼音", languages: ["zh-Hans"])
         let english = InputSource(id: "abc", name: "ABC", languages: ["en"])
         var state = InputState(source: chinese, capsLock: false)
-        let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock })
+        let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter())
         var symbols: [String] = []
         monitor.onChange = { symbols.append($0.symbol) }
         state = InputState(source: english, capsLock: false)
@@ -1718,7 +1972,7 @@ enum Tests {
     private static func checkCancelledCapsLockAndFinalReread() {
         let english = InputSource(id: "abc", name: "ABC", languages: ["en"])
         var state = InputState(source: english, capsLock: false)
-        let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock })
+        let monitor = InputSourceMonitor(readState: { state }, readCapsLock: { state.capsLock }, sourceNotifications: NotificationCenter(), workspaceNotifications: NotificationCenter())
         var symbols: [String] = []
         monitor.onChange = { symbols.append($0.symbol) }
         state = InputState(source: english, capsLock: true)

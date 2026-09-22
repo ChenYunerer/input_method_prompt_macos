@@ -52,7 +52,7 @@ open "dist/中英提示.app"
 
 使用 Carbon 的 `TISCopyCurrentKeyboardInputSource` 读取实际输入源，订阅 `kTISNotifySelectedKeyboardInputSourceChanged`，不根据按键猜测切换结果。系统自带「简体拼音 ↔ ABC」是本工程的目标场景。通过菜单切换或应用自动切换输入源时也会提示。
 
-Caps Lock 通过 `CGEventSource.flagsState(.combinedSessionState)` 每 80 毫秒读取修饰键状态，独立于输入源通知；不读取具体按键。状态表说明见 [Apple CGEventSourceStateID](https://developer.apple.com/documentation/coregraphics/cgeventsourcestateid)。
+Caps Lock 每 80 毫秒通过公开 `IOHIDServiceClientCopyProperty` 读取各键盘的 `HIDCapsLockState`，独立于输入源通知；不读取具体按键。任一键盘明确开启即为开启，全部明确关闭才为关闭；无键盘、枚举失败或无法判断时返回不可用并重试。复用一个简单 HID 客户端，每次重新枚举以跟随设备连接变化；不再使用会残留的事件标志和旧 `IOHIDGetModifierLockState`。接口说明见 [Apple IOKit 文档](https://developer.apple.com/documentation/iokit/2269430-iohidserviceclientcopyproperty)。
 
 输入源与 Caps Lock 更新会合并后再显示：普通变化需稳定 100 毫秒，大写锁定开启需稳定 250 毫秒，并在显示前重新读取状态，过滤中英文切换过程中的短暂大写标志。等待状态确认不计入浮层的停留时长（默认 1 秒）。回归测试覆盖通知先后顺序、短暂大写恢复、真实锁定保持及最终状态复核。
 
@@ -102,3 +102,22 @@ Caps Lock 通过 `CGEventSource.flagsState(.combinedSessionState)` 每 80 毫秒
 设置 → 切换提示新增秒数输入框及步进器，范围 0.1–10 秒、步进 0.1 秒，默认 1 秒。偏好使用 `switchingPromptDuration` 保存；升级时缺少该键按 1 秒处理。修改从下一次提示或手动预览生效，当前一轮不重置；恢复默认外观不修改时长。鼠标跟随的临时展示仍停留 0.5 秒。
 
 专项验证：`bash app/scripts/test.sh --switching-duration-only`，覆盖默认值、持久化、控件同步、输入校验及计时衔接。
+
+## 点击窗口后的大写误报修复（1.11.1 / build 31）
+
+历史实现，已由 build 33 替换：基于撤回 P0 后的 `acaf963`。事件接口报告大写时，再通过系统锁定接口核验；锁定已关闭时不展示 `A`。不恢复 P0 校准或第三方输入法适配。系统锁定接口不可用时返回读取失败并低频重试，不将事件标志当作替代答案。IOKit 连接复用并在失效/释放时关闭，不记录按键或输入内容。
+
+专项：`bash app/scripts/test.sh --caps-lock-only`，覆盖英文下长按开启、短按关闭、点击 Chrome 后遗留大写标志、真正重新开启，以及接口失败和恢复。build 31 区别于历史 P0 的 1.11.1 / build 30。
+
+## 恢复状态更新能力（1.11.1 / build 32）
+
+在 build 31 的 Caps Lock 核验基础上，仅恢复 P0 的前三项：每 2 秒校准、应用/Space/系统及屏幕唤醒/会话恢复后刷新、系统公开的输入模式 ID 变化识别。所有入口共享去重、防闪和锁定核验；不根据模式 ID 文本猜测中英文，不新增输入法专属适配或设置页诊断。
+
+专项：`bash app/scripts/test.sh --input-state-only`，涵盖漏通知、混合通知合并、模式变化、释放后停止监听，以及 Chrome 误报时序与上述刷新路径的交错。
+
+
+## 更换 Caps Lock 状态来源（1.11.1 / build 33）
+
+实测发现 build 31/32 使用的两个旧接口可能同时误报开启。2026-09-22 的用户实体操作中，键盘服务属性正确跟随开启和关闭，关闭后旧接口再次报开启时，三个键盘服务仍全部报告关闭。因此改读公开键盘服务属性，不再把旧接口当作真实锁定状态。
+
+保留 P0 前三项和 100/250 毫秒防闪确认，无新增权限或输入法专属适配。专项测试覆盖多键盘、热插拔快照、未知属性、短暂开启和关闭反跳，以及恢复的全部刷新入口。已验证范围和安装记录见 [技术方案第 22 节](docs/TECHNICAL_DESIGN.md#22-更换-caps-lock-状态来源1111--build-33)。

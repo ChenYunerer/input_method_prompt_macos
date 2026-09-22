@@ -107,7 +107,11 @@ enum Main {
         }
         if CommandLine.arguments.contains("--diagnose") {
             if let source = InputSource.current() {
-                print("当前输入源：\(source.id) | \(source.name) | \(source.languages) | \(source.symbol) | Caps Lock: \(InputState.capsLockEnabled())")
+                guard let capsLock = InputState.capsLockEnabled() else {
+                    print("无法读取 Caps Lock 锁定状态")
+                    exit(1)
+                }
+                print("当前输入源：\(source.id) | \(source.name) | \(source.languages) | \(source.symbol) | Caps Lock: \(capsLock)")
             } else {
                 print("无法读取当前输入源")
                 exit(1)

@@ -5,6 +5,7 @@ cd "$PROJECT_DIR"
 mkdir -p .build/local-tests
 swiftc -parse-as-library -swift-version 5 \
     Sources/InputMethodPrompt/InputSource.swift \
+    Sources/InputMethodPrompt/CapsLockReader.swift \
     Sources/InputMethodPrompt/PromptView.swift \
     Sources/InputMethodPrompt/LoginItem.swift \
     Sources/InputMethodPrompt/Settings.swift \

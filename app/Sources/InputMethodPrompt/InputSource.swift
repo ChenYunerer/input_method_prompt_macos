@@ -1,11 +1,19 @@
 import Carbon
-import Foundation
+import AppKit
 import CoreGraphics
 
 struct InputSource: Equatable {
     let id: String
     let name: String
     let languages: [String]
+    let inputModeID: String?
+
+    init(id: String, name: String, languages: [String], inputModeID: String? = nil) {
+        self.id = id
+        self.name = name
+        self.languages = languages
+        self.inputModeID = inputModeID
+    }
 
     var language: String {
         (languages.first ?? "").replacingOccurrences(of: "_", with: "-")
@@ -39,7 +47,8 @@ struct InputSource: Equatable {
         guard let id: String = property(kTISPropertyInputSourceID),
               let name: String = property(kTISPropertyLocalizedName) else { return nil }
         return InputSource(id: id, name: name,
-                           languages: property(kTISPropertyInputSourceLanguages) ?? [])
+                           languages: property(kTISPropertyInputSourceLanguages) ?? [],
+                           inputModeID: property(kTISPropertyInputModeID))
     }
 
     static func current() -> InputSource? {
@@ -56,13 +65,13 @@ struct InputState: Equatable {
     var caption: String { capsLock ? "大写锁定已开启" : (source.language == "en" ? "英文小写" : source.caption) }
     var statusSymbol: String { capsLock ? "⇪" : source.symbol }
 
-    static func capsLockEnabled() -> Bool {
-        CGEventSource.flagsState(.combinedSessionState).contains(.maskAlphaShift)
+    static func capsLockEnabled() -> Bool? {
+        CapsLockReader.shared.read()
     }
 
     static func current() -> InputState? {
-        guard let source = InputSource.current() else { return nil }
-        return InputState(source: source, capsLock: capsLockEnabled())
+        guard let source = InputSource.current(), let capsLock = capsLockEnabled() else { return nil }
+        return InputState(source: source, capsLock: capsLock)
     }
 }
 
@@ -72,28 +81,44 @@ final class InputSourceMonitor: NSObject {
     private var capsLockTimer: Timer?
     private var settlingTimer: Timer?
     private var recoveryTimer: Timer?
+    private var reconciliationTimer: Timer?
+    private let sourceNotifications: NotificationCenter
+    private let workspaceNotifications: NotificationCenter
     private var pending: InputState?
-    private var lastObservedCapsLock = false
+    private var lastObservedCapsLock: Bool?
     private var refreshScheduled = false
     private let readState: () -> InputState?
-    private let readCapsLock: () -> Bool
+    private let readCapsLock: () -> Bool?
 
     init(readState: @escaping () -> InputState? = InputState.current,
-         readCapsLock: @escaping () -> Bool = InputState.capsLockEnabled) {
+         readCapsLock: @escaping () -> Bool? = InputState.capsLockEnabled,
+         sourceNotifications: NotificationCenter = DistributedNotificationCenter.default(),
+         workspaceNotifications: NotificationCenter = NSWorkspace.shared.notificationCenter,
+         reconciliationInterval: TimeInterval = 2) {
+        precondition(reconciliationInterval.isFinite && reconciliationInterval > 0)
         self.readState = readState
         self.readCapsLock = readCapsLock
+        self.sourceNotifications = sourceNotifications
+        self.workspaceNotifications = workspaceNotifications
         super.init()
         current = readState()
         lastObservedCapsLock = current?.capsLock ?? readCapsLock()
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(sourceChanged),
-            name: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
-            object: nil, suspensionBehavior: .deliverImmediately
-        )
-        // Read only the modifier state, without capturing keystrokes or typed text.
+        let sourceNotification = Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String)
+        if let distributed = sourceNotifications as? DistributedNotificationCenter {
+            distributed.addObserver(self, selector: #selector(sourceChanged), name: sourceNotification,
+                                    object: nil, suspensionBehavior: .deliverImmediately)
+        } else {
+            sourceNotifications.addObserver(self, selector: #selector(sourceChanged), name: sourceNotification, object: nil)
+        }
+        // Read only keyboard lock properties, without capturing keystrokes or typed text.
         let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
             guard let self else { return }
-            let capsLock = self.readCapsLock()
+            guard let capsLock = self.readCapsLock() else {
+                self.lastObservedCapsLock = nil
+                self.cancelPending()
+                self.scheduleRecovery()
+                return
+            }
             // Compare against the last observation, not the committed state: the
             // latter deliberately lags during settling and caused repeated TIS reads.
             guard capsLock != self.lastObservedCapsLock else { return }
@@ -103,11 +128,27 @@ final class InputSourceMonitor: NSObject {
         timer.tolerance = 0.015
         capsLockTimer = timer
         RunLoop.main.add(timer, forMode: .common)
+        // Reconcile missed source notifications through the same confirmation
+        // path, including the keyboard service query in CapsLockReader.
+        for name in [NSWorkspace.didActivateApplicationNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification,
+                     NSWorkspace.didWakeNotification,
+                     NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            workspaceNotifications.addObserver(self, selector: #selector(sourceChanged), name: name, object: nil)
+        }
+        let reconciliation = Timer(timeInterval: reconciliationInterval, repeats: true) { [weak self] _ in
+            guard let self, self.pending == nil, self.recoveryTimer == nil else { return }
+            self.scheduleRefresh()
+        }
+        reconciliation.tolerance = reconciliationInterval * 0.1
+        reconciliationTimer = reconciliation
+        RunLoop.main.add(reconciliation, forMode: .common)
         if current == nil { scheduleRecovery() }
     }
 
     @objc private func sourceChanged() {
-        // TIS and modifier flags can change on separate run-loop turns.
+        // TIS and keyboard lock states can change on separate run-loop turns.
         if Thread.isMainThread {
             scheduleRefresh()
         } else {
@@ -195,7 +236,9 @@ final class InputSourceMonitor: NSObject {
     deinit {
         capsLockTimer?.invalidate()
         recoveryTimer?.invalidate()
+        reconciliationTimer?.invalidate()
         cancelPending()
-        DistributedNotificationCenter.default().removeObserver(self)
+        workspaceNotifications.removeObserver(self)
+        sourceNotifications.removeObserver(self)
     }
 }

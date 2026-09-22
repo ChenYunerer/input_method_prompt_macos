@@ -2,20 +2,20 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 实现基线 | 本地应用代码恢复至 `76e5a0a`（1.11.0 / 构建号 29），保留 `19fcd9d` 的仅 arm64 发布策略 |
+| 实现基线 | 基于 `acaf963`，本地 1.11.1 / 构建号 33；仅 arm64 |
 | 整理日期 | 2026-09-22 |
 | 需求基线 | [PRD](PRD.md) |
 | 源码仓库 | [ChenYunerer/input_method_prompt_macos](https://github.com/ChenYunerer/input_method_prompt_macos)，公开仓库，默认分支 `main` |
-| 本轮范围 | 撤回 P0 的状态校准、生命周期刷新、模式元数据、设置页诊断入口与扩展报告 |
+| 本轮范围 | 改读键盘服务 Caps Lock 属性；保留低频校准、生命周期刷新和公开模式 ID 识别 |
 | 下载入口 | [最新构建](https://github.com/ChenYunerer/input_method_prompt_macos/releases/latest)，历史回执见第 18 节 |
 
 第 1–14 节描述当前实现；第 15 节及第 16 节保留演进过程，版本标题下的旧行为仅用于解释改动。当前鼠标显示策略以第 16.9–16.12 节和 PRD 为准，验证记录注明其所属版本。
 
-本次撤回 P0，已将本机应用替换为 1.11.0 / 构建 29 并重启，11 项已有偏好保持一致。推送 `main` 后由 arm64 工作流构建下载包；发布是否完成以对应提交的 Actions / Release 回执为准，历史 1.11.1 下载包保留。
+当前为本地 1.11.1 / 构建 33：Caps Lock 改读键盘服务属性，替换会同时误报的两个旧状态接口；保留已恢复的 P0 周期校准、生命周期刷新和公开模式 ID 识别。设置页复制诊断不恢复。历史 build 31/32 的修复范围不足，用户已复现新的误报；历史测试记录仅说明对应版本的已覆盖场景。
 
 ## 1. 方案概述
 
-使用 Swift + AppKit 构建原生菜单栏应用。Carbon TIS 提供当前输入源及变更通知；CoreGraphics 提供 Caps Lock 状态；监测器合并变化并确认候选状态，再驱动菜单栏与非激活浮层。
+使用 Swift + AppKit 构建原生菜单栏应用。Carbon TIS 提供当前输入源及变更通知；IOKit 提供各键盘服务的 Caps Lock 属性；监测器合并变化并确认候选状态，再驱动菜单栏与非激活浮层。
 
 浮层的背景透明度与整窗动画分开控制。配置通过 `UserDefaults` 保存；自动启动通过 `SMAppService.mainApp` 管理；构建过程生成多尺寸 `.icns` 并打包本地 `.app`。没有第三方运行依赖、服务端或网络请求。
 
@@ -52,6 +52,7 @@ input_method_prompt_macos/
 │   ├── Sources/InputMethodPrompt/
 │   │   ├── App.swift
 │   │   ├── InputSource.swift
+│   │   ├── CapsLockReader.swift
 │   │   ├── FullScreenIndicator.swift
 │   │   ├── MouseIndicator.swift
 │   │   ├── MouseFrameClock.swift
@@ -74,6 +75,7 @@ input_method_prompt_macos/
 | --- | --- | --- |
 | [App.swift](../Sources/InputMethodPrompt/App.swift) | 生命周期、菜单、单实例检查、模块装配、独立提示开关 | R02、R05 |
 | [InputSource.swift](../Sources/InputMethodPrompt/InputSource.swift) | 输入源读取、语言映射、Caps Lock、状态合并与确认 | R01、R04 |
+| [CapsLockReader.swift](../Sources/InputMethodPrompt/CapsLockReader.swift) | 公开键盘服务枚举、布尔属性读取、多键盘锁定状态汇总 | R01、R04 |
 | [FullScreenIndicator.swift](../Sources/InputMethodPrompt/FullScreenIndicator.swift) | 全屏几何检测、通知与轮询、每屏常驻标识 | R09 |
 | [MouseFrameClock.swift](../Sources/InputMethodPrompt/MouseFrameClock.swift) | 窗口绑定的屏幕同步回调、刷新率适配、暂停与释放 | R11 |
 | [MouseIndicator.swift](../Sources/InputMethodPrompt/MouseIndicator.swift) | 鼠标事件与帧调度、跨屏避让、静止/指针隐藏策略、临时展示、双向动画与资源清理 | R11 |
@@ -106,10 +108,10 @@ input_method_prompt_macos/
 
 | 模型 | 字段 | 用途 |
 | --- | --- | --- |
-| `InputSource` | `id`、`name`、`languages` | TIS 输入源快照 |
+| `InputSource` | `id`、`name`、`languages`、可选 `inputModeID` | TIS 输入源及公开模式快照 |
 | `InputState` | `source`、`capsLock` | 对外展示和比较的完整状态 |
 
-两者均为 `Equatable`。比较包含输入源 ID、名称、语言数组及 Caps Lock，不只比较最终显示字符。
+两者均为 `Equatable`。比较包含输入源 ID、名称、语言数组、公开模式 ID 及 Caps Lock，不只比较最终显示字符。
 
 语言取 `languages.first`，将 `_` 归一为 `-`，取首段并转小写。`zh` 对应「中」、`en` 在浮层对应「a」而在菜单栏对应「EN」；`ja` 对应「日」、`ko` 对应「한」；其余语言取最多三个字符转大写，无语言则为键盘标识。
 
@@ -120,13 +122,17 @@ input_method_prompt_macos/
 | 数据 | API / 机制 |
 | --- | --- |
 | 当前输入源 | `TISCopyCurrentKeyboardInputSource` |
-| 输入源属性 | `TISGetInputSourceProperty`，读取 ID、名称、语言 |
+| 输入源属性 | `TISGetInputSourceProperty`，读取 ID、名称、语言及可选 `kTISPropertyInputModeID` |
 | 输入源变更 | `kTISNotifySelectedKeyboardInputSourceChanged`，通过分布式通知中心监听 |
-| Caps Lock | `CGEventSource.flagsState(.combinedSessionState).contains(.maskAlphaShift)` |
+| Caps Lock | `CapsLockReader`：`IOHIDEventSystemClientCopyServices` 枚举键盘，通过 `IOHIDServiceClientCopyProperty` 读取 `kIOHIDServiceCapsLockStateKey`（`HIDCapsLockState`） |
 
 Caps Lock 每 80 ms 读取一次，定时器容差 15 ms。只有锁定标志与最近观测值 `lastObservedCapsLock` 不同，才读取完整状态，避免确认窗口内反复读取 TIS。输入源通知切到主队列，并通过 `refreshScheduled` 合并同一轮通知，再调用同一个刷新入口。
 
-程序不安装键盘事件拦截器，不修改按键，不读取输入文本。输入源和修饰键是分别读取的，不构成原子快照，因此需要下一节的状态确认。
+复用一个由 ARC 管理的简单 HID 客户端；每次枚举当前服务，只读取符合 Generic Desktop / Keyboard 用途的服务。属性必须是 CFBoolean，不把数字或字符串强转为布尔。任一键盘返回 true 则为开启；非空列表全部明确 false 才为关闭；列表为空、枚举失败，或无 true 且存在未知属性时返回 nil。每次重新枚举使移除设备不会留下旧状态，不依赖品牌、名称或固定顺序。快速轮询遇到 nil 取消候选并进入原有单次恢复流程，不频繁读取 TIS。确认截止时再次查询，100/250 ms 规则过滤短暂变化。
+
+程序不安装键盘事件拦截器，不修改按键，不读取输入文本。本机公开属性读取不需要新增辅助功能或输入监控权限。输入源和多个键盘属性分别读取，不构成原子快照，因此需要下一节的状态确认。
+
+默认每 2 秒校准，容差 0.2 秒；候选确认和失败恢复期间跳过校准。`NSWorkspace` 的应用激活、Space 切换、系统/屏幕唤醒、会话恢复通知复用输入源通知的合并入口，后台通知转主线程。定时器与观察者随监测器释放。全部入口调用相同状态读取与 Caps Lock 核验，不绕过防闪。模式 ID 参与状态比较，不按 ID 字符串推断语言；不恢复诊断所用 Bundle ID / ASCII 能力等额外字段。
 
 ### 4.3 读取失败
 
@@ -293,7 +299,7 @@ dist/中英提示.app/Contents/
 └── _CodeSignature/…
 ```
 
-关键元数据：Bundle ID `local.yun.InputMethodPrompt`，版本 `1.11.0`，构建号 `29`，最低系统 `13.0`，`CFBundleIconFile=AppIcon.icns`。构建使用当前机器架构，未输出 Universal 二进制。
+关键元数据：Bundle ID `local.yun.InputMethodPrompt`，版本 `1.11.1`，构建号 `32`，最低系统 `13.0`，`CFBundleIconFile=AppIcon.icns`。构建使用当前机器架构，未输出 Universal 二进制。
 
 命令从项目根目录执行：
 
@@ -307,7 +313,7 @@ bash app/scripts/test.sh
 默认输出为 `dist/中英提示.app`；可通过 `INPUT_PROMPT_APP_DIR` 指定完整 `.app` 路径。例如保留版本化产物：
 
 ```sh
-INPUT_PROMPT_APP_DIR="$PWD/dist/1.11.0/中英提示.app" bash app/scripts/build-app.sh
+INPUT_PROMPT_APP_DIR="$PWD/dist/p0-restored/中英提示.app" bash app/scripts/build-app.sh
 ```
 
 脚本先在输出所在文件系统创建临时目录，完成打包和验签后才替换旧包；替换失败时尝试恢复旧包。按输出路径加目录锁，拒绝同目标并发构建。输出不是普通 `.app` 目录或存在符号链接时拒绝覆盖；回滚目标被其他进程占用时保留备份供核对。SIGKILL 或断电无法执行清理，可能遗留锁或备份。
@@ -695,3 +701,63 @@ CI 不声明完成真实登录启动、所有 macOS 版本或硬件的人工验�
 应用源码、应用回归测试与版本元数据恢复至 `76e5a0a`；删除 P0 的周期校准、workspace 生命周期监听、扩展输入源属性、设置页诊断及扩展报告。保留原有 Caps Lock 轮询、防闪确认、读取失败恢复与基础 `--diagnose`，以及 `19fcd9d` 的 arm64 发布流程。
 
 验证：常规回归 344 项通过、0 失败；发布校验测试 9 项通过；release 构建、arm64 架构与签名校验通过。产物：`dist/rollback-p0/中英提示.app`（1.11.0 / 构建 29）。源码逐文件对比确认与 P0 前一致；未将回退等同于已确认 Caps Lock 误报根因或修复。本机 `/Applications/中英提示.app` 已替换并重启，确认单个新进程，安装前后 11 项偏好一致，旧包保留备份。回退以新的提交交付，保留既有 Git 历史；推送 `main` 后由现有 arm64 工作流自动构建发布。
+
+## 20. 点击窗口后的 Caps Lock 误报（1.11.1 / build 31）
+
+历史实现，已被第 22 节替换：后续实测确认 `IOHIDGetModifierLockState` 也读取事件标志，不能作为独立的键盘锁定依据。以下保留当时的实现与测试记录，不代表完整修复。
+
+用户复现步骤：英文输入下长按中/英键开启大写，短按关闭，再点击 Chrome 页面，提示错误的大写锁定。2026-09-22 15:11:20 本机对照记录中，session / HID 事件标志均为 `true`，系统锁定为 `false`；旧监测器在 250 ms 后仍发布 `A`。将事件表切换为 HID 表不能解决此次分歧。
+
+新增 `CapsLockReader`，仅在大写事件标志出现时核验系统锁定，修复三处图标共同使用的状态来源。保留原有 100/250 ms 防闪、80 ms 轮询及失败恢复；不增加输入源周期校准、窗口激活监听或第三方输入法适配。基础 `--diagnose` 在锁定接口读取失败时输出不可用并返回非零。
+
+回归入口：`bash app/scripts/test.sh --caps-lock-only`。模拟事件残留而锁定关闭的场景，在仅依赖事件标志的判定下失败；修复后覆盖完整开/关/点击窗口顺序、残留持续 3.8 秒、输入源同时变化、真实再次开启、服务不可用、连接复用、失效重连及资源释放。自动化结果不能替代修复包安装后的物理按键回验。
+
+本次验证：Caps Lock 专项 27 项通过，全量 363 项通过，均为 0 失败；arm64 release 构建、签名校验与基础 `--diagnose` 通过。已将 1.11.1 / build 31 安装到 `/Applications/中英提示.app` 并重启，确认单个新进程、安装二进制与构建产物 SHA-256 一致，11 项偏好不变；旧 1.11.0 包已备份。该阶段只读采样已停止，未单独提交。后续用户仍复现误报，现已由第 22 节实现替换。
+
+## 21. 恢复 P0 前三项（1.11.1 / build 32）
+
+历史 Caps Lock 核验仍继承 build 31 的局限；build 33 更换其读取接口，并保留本节的三项状态更新能力。
+
+在第 20 节锁定核验修复上，恢复 2 秒周期校准、五类 workspace 生命周期通知及系统公开模式 ID。设置页复制诊断和扩展诊断报告不恢复，通用页维持原布局；不恢复用于诊断的其他输入源元数据。
+
+专项恢复漏通知自动纠正、后台通知转主线程、通知合并、不重复提示、模式 ID 变化、定时器和观察者释放验证。Chrome 复现回归增加五类生命周期触发，并在残留大写事件标志持续 3.8 秒期间跨过默认校准周期，确认不会发布错误的 `A`，真正再次开启大写仍被识别。
+
+本轮验证：输入状态专项 41 项通过、全量 383 项通过，均为 0 失败；arm64 release 构建和签名校验通过。产物 `dist/p0-restored/中英提示.app`（1.11.1 / build 32）已替换到 `/Applications/中英提示.app` 并重启；11 项偏好不变、仅单个新进程，安装二进制与构建产物 SHA-256 一致，旧 build 31 包保留备份。设置页无新增诊断控件。该阶段未单独提交；前三项状态更新能力随 build 33 一并交付，Caps Lock 后续问题及回验见第 22 节。
+
+## 22. 更换 Caps Lock 状态来源（1.11.1 / build 33）
+
+### 22.1 根因与实机对照
+
+build 31/32 将 `IOHIDGetModifierLockState` 视为独立锁定依据，这个判断不成立：Apple 的 [IOHIDSystem 实现](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDSystem/IOHIDSystem.cpp#L3346-L3359)仍从事件标志取值。因此，两个旧接口同时残留时，增加一次交叉核验仍会发布错误的 `A`，延长确认时间也不能解决持续残留。
+
+2026-09-22，用户真正开启大写、保持数秒、再关闭，完成只读对照。记录只包含状态与时间，不记录按键内容：
+
+| 本地时间 | 会话事件标志 | 使用中的键盘服务 | 其他两个键盘服务 | 说明 |
+| --- | --- | --- | --- | --- |
+| 16:02:13 | 开启 | 开启 | 关闭 | 真正开启大写 |
+| 16:02:19 | 关闭 | 关闭 | 关闭 | 真正关闭大写 |
+| 16:02:23 | 开启 | 关闭 | 关闭 | 关闭后旧标志再次残留 |
+| 16:02:38 | 多次变化 | 关闭 | 关闭 | build 32 影子监测器再次发布 A；当时会话、HID 事件与旧锁定接口均为 true |
+
+影子监测器由 build 32 的生产状态代码构建，独立运行，不等同于已安装进程内部的埋点。开启前约 53 ms 脉冲及关闭时的短暂反跳也记录在案；后续中英切换中还观察到不足 125 ms 的开启脉冲，因此保留既有确认窗口。
+
+### 22.2 实现和边界
+
+通过公开简单 HID 客户端枚举键盘服务，读取 `kIOHIDServiceCapsLockStateKey`。SDK 将其定义为 CFBoolean；Apple 的 [键盘过滤器实现](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDEventSystemPlugIns/IOHIDKeyboardFilter.mm#L804-L808)直接返回服务内部锁定状态。[会话修饰键汇总实现](https://github.com/apple-oss-distributions/IOHIDFamily/blob/main/IOHIDEventSystemPlugIns/IOHIDNXEventTranslatorSessionFilter.mm#L664-L671)对各服务采用按位 OR；结合本机多键盘实测，采用“任一明确开启即开启”，不要求所有键盘同时为 true。
+
+- 明确关闭要求非空键盘列表全部为 false；服务缺失或属性类型不符不推断为关闭。
+- 不使用 `CGEventSource.flagsState`、`NSEvent.modifierFlags` 或 `IOHIDGetModifierLockState` 兜底。
+- 每次重新枚举当前服务，移除的键盘状态不会被缓存；一个 ARC 管理的客户端供多次查询复用。
+- 保留 80 ms 轮询、开启 250 ms / 其余 100 ms 确认、提交前重读、失败恢复及 P0 前三项。无新增诊断 UI。
+- 本机读取不要求新增权限，不进行第三方输入法专属适配，不写入键盘属性，也不捕获输入内容。
+
+只读原型 100 次查询，本机中位耗时 0.121 ms、P95 0.161 ms，最大 0.248 ms；这仅是服务查询的局部测量，不是整机能耗或所有设备的保证。不同 macOS 版本、虚拟键盘、远程输入及其他键盘组合仍需实机验证。状态属性反映锁定而非最终输入字符，不把“当前输出大写字符”与“Caps Lock 开启”等同。
+
+
+### 22.3 验证与本机交付
+
+- Caps Lock 专项 41 项、全量回归 392 项通过，0 失败。覆盖当前状态读取、多键盘汇总、缺失/错误类型、移除/新增键盘快照、短暂开启及关闭反跳，保留全部 P0 前三项回归。
+- 使用新生产读取器和监测器独立只读运行 60 秒：749 次采样中旧事件标志为开启、新服务状态为关闭；确认状态保持关闭，错误的大写发布为 0。这是本机实时对照，不是安装进程的内部记录。
+- arm64 release 构建、签名校验与基础 `--diagnose` 通过。产物为 `dist/keyboard-caps-fix/中英提示.app`（1.11.1 / build 33）。
+- 已替换 `/Applications/中英提示.app` 并重启；仅单个新进程，安装二进制与产物 SHA-256 一致，11 项偏好未变化，build 32 已备份。回执位于忽略目录 `app/.build/local-install/20260922-161344-keyboard-caps-fix/receipt.json`。
+- 调查采样进程均已停止。PRD 和技术方案已同步。用户实体开关已验证新接口，2026-09-22 安装后反馈“暂时验证正常”，并要求推送。长期运行与完整多设备兼容性仍需后续验证。

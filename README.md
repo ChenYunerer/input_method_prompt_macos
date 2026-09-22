@@ -54,7 +54,7 @@
 | `A` | Caps Lock 已开启；菜单栏显示 `⇪` |
 | `日` / `한` / 其他 | 对应语言标识；无法识别时显示 `⌨` |
 
-按住 Shift 的临时大写不会触发提示。系统的输入源与 Caps Lock 状态可能先后变化，程序会做短暂确认，减少中文切换英文时先闪出 `A` 再显示 `a` 的情况。
+输入源漏通知时每 2 秒校准，切换应用、Space 或唤醒后也会重新确认；相同状态不会重复弹出。大写提示直接读取键盘服务的锁定状态，避免关闭大写后被残留的事件标志误判为开启。按住 Shift 的临时大写不会触发提示。系统的输入源与 Caps Lock 状态可能先后变化，程序会做短暂确认，减少中文切换英文时先闪出 `A` 再显示 `a` 的情况。
 
 菜单栏提供「显示当前输入法」「设置…」「退出中英提示」。手动显示只展示状态，不替你切换输入法；关闭自动切换提示后，手动显示仍然可用。
 
@@ -141,6 +141,8 @@ bash app/scripts/test.sh
 bash app/scripts/test.sh --switch-reveal-only
 bash app/scripts/test.sh --performance-only
 bash app/scripts/test.sh --switching-duration-only
+bash app/scripts/test.sh --caps-lock-only
+bash app/scripts/test.sh --input-state-only
 
 # 读取当前输入状态 / 检查真实浮层动画
 "dist/中英提示.app/Contents/MacOS/InputMethodPrompt" --diagnose
