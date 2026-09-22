@@ -2,13 +2,14 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 实现基线 | 应用 1.11.0 / 构建号 29，分支 `feat/switching-prompt-duration`（基于 `8885994`） |
-| 整理日期 | 2026-09-21 |
+| 实现基线 | 本地 1.11.1 / 构建号 30，分支 `fix/input-state-reliability`；基于 `main` 提交 [76e5a0a](https://github.com/ChenYunerer/input_method_prompt_macos/commit/76e5a0abdcc1353331cb34ba274fa22f35f4d44b) |
+| 整理日期 | 2026-09-22 |
 | 需求基线 | [PRD](PRD.md) |
 | 源码仓库 | [ChenYunerer/input_method_prompt_macos](https://github.com/ChenYunerer/input_method_prompt_macos)，公开仓库，默认分支 `main` |
-| 本轮范围 | 新增中央切换提示停留时长配置、持久化、控件与计时回归 |
+| 本轮范围 | 输入状态低频校准、应用/会话切换后刷新、公开模式元数据、诊断入口；仅本地实现 |
+| 发布版本 | [1.11.0 · build 29 · CI 2.1](https://github.com/ChenYunerer/input_method_prompt_macos/releases/tag/ci-35564417315-1)，2026-09-21 发布 |
 
-第 1–14 节描述当前实现；第 15 节及第 16 节保留演进过程，版本标题下的旧行为仅用于解释改动。当前鼠标显示策略以第 16.9–16.12 节和 PRD 为准，验证记录注明其所属版本。
+第 1–14 节描述当前实现；第 15 节及第 16 节保留演进过程，版本标题下的旧行为仅用于解释改动。当前鼠标显示策略以第 16.9–16.12 节和 PRD 为准，验证记录注明其所属版本；1.11.1 的输入状态可靠性验证见第 19 节。
 
 ## 1. 方案概述
 
@@ -20,6 +21,7 @@
 flowchart LR
     TIS["TIS 输入源通知"] --> Monitor["InputSourceMonitor\n候选状态确认"]
     Flags["Caps Lock 状态\n80 ms 轮询"] --> Monitor
+    Reconcile["2 秒校准 / 应用、Space、唤醒通知"] --> Monitor
     Monitor --> Delegate["AppDelegate"]
     Delegate --> Mouse["MouseIndicator<br/>鼠标跟随提示"]
     Settings -->|开关、大小、透明度、静止策略| Mouse
@@ -103,10 +105,10 @@ input_method_prompt_macos/
 
 | 模型 | 字段 | 用途 |
 | --- | --- | --- |
-| `InputSource` | `id`、`name`、`languages` | TIS 输入源快照 |
+| `InputSource` | `id`、`name`、`languages`、`inputModeID`、`bundleID`、`sourceType`、`isASCIICapable` | TIS 输入源及可选公开元数据快照 |
 | `InputState` | `source`、`capsLock` | 对外展示和比较的完整状态 |
 
-两者均为 `Equatable`。比较包含输入源 ID、名称、语言数组及 Caps Lock，不只比较最终显示字符。
+两者均为 `Equatable`。比较包含所有输入源字段及 Caps Lock，不只比较最终显示字符；系统公开的模式 ID 改变也会触发确认。可选元数据缺失为 nil，不据此猜测模式。ASCII 能力仅供诊断，不参与语言判定。
 
 语言取 `languages.first`，将 `_` 归一为 `-`，取首段并转小写。`zh` 对应「中」、`en` 在浮层对应「a」而在菜单栏对应「EN」；`ja` 对应「日」、`ko` 对应「한」；其余语言取最多三个字符转大写，无语言则为键盘标识。
 
@@ -117,17 +119,27 @@ input_method_prompt_macos/
 | 数据 | API / 机制 |
 | --- | --- |
 | 当前输入源 | `TISCopyCurrentKeyboardInputSource` |
-| 输入源属性 | `TISGetInputSourceProperty`，读取 ID、名称、语言 |
+| 输入源属性 | `TISGetInputSourceProperty`，读取 ID、名称、语言以及可选模式 ID、Bundle ID、类型、ASCII 能力 |
 | 输入源变更 | `kTISNotifySelectedKeyboardInputSourceChanged`，通过分布式通知中心监听 |
 | Caps Lock | `CGEventSource.flagsState(.combinedSessionState).contains(.maskAlphaShift)` |
 
 Caps Lock 每 80 ms 读取一次，定时器容差 15 ms。只有锁定标志与最近观测值 `lastObservedCapsLock` 不同，才读取完整状态，避免确认窗口内反复读取 TIS。输入源通知切到主队列，并通过 `refreshScheduled` 合并同一轮通知，再调用同一个刷新入口。
+
+1.11.1 额外订阅 `NSWorkspace` 的 `didActivateApplication`、`activeSpaceDidChange`、`didWake`、`screensDidWake`、`sessionDidBecomeActive` 通知；与 TIS 通知共用主队列合并入口。添加 2 秒重复校准定时器（容差 0.2 秒，common run-loop mode），候选确认或失败恢复计时器存在时跳过本次校准，避免重复读取、延长确认或加密重试。无变化不发布 `onChange`；析构取消全部定时器并从两个通知中心注销。2 秒是调度周期，不是纠正延迟上限。
 
 程序不安装键盘事件拦截器，不修改按键，不读取输入文本。输入源和修饰键是分别读取的，不构成原子快照，因此需要下一节的状态确认。
 
 ### 4.3 读取失败
 
 缺失输入源、ID 或名称时返回 `nil`；语言缺失则使用空数组。刷新读不到完整状态时取消候选计时，不发布新的状态；已有确认状态继续保留。冷启动时没有确认状态，菜单栏显示无法读取，浮层不展示伪造结果。读取失败时安排唯一的 0.5 秒单次恢复计时器（容差 0.05 秒）；持续失败继续安排下一次，成功即取消，再走正常确认流程。对象释放时取消恢复和确认计时器。
+
+### 4.4 诊断与识别边界
+
+`InputDiagnostics.report` 将最近确认状态与本次即时读取分开标注，输出版本、系统版本、采集时间、输入源 ID/名称/语言、模式 ID、Bundle ID、类型、ASCII 能力及 Caps Lock。缺失属性显示“系统未提供”，整次读取失败显示“不可用”。`--diagnose` 在独立进程读取，没有主进程的已确认状态；读取失败返回退出码 1。
+
+设置页通过闭包获取主进程的确认状态与即时快照，只有用户点击“复制诊断信息”时写入 `NSPasteboard.general`，写入结果反馈成功/失败，不联网。报告不包含输入文本、按键记录、窗口标题或用户文件路径；切到设置可能改变输入源，不能把即时快照当作过去故障时刻的记录。
+
+核对本机 `TextInputSources.h`：ASCII-capable 是能力，不等于当前英文模式；当前键盘布局可能是输入法底层布局，也不能用于判定内部中英文。模式 ID 用于完整状态比较，不猜测 ID 字符串语义；展示语言仍取系统公开语言。未公开内部模式的输入法需要获得实际产品/版本及复现信息后再评估适配。
 
 ## 5. 状态合并与短暂大写标志修复
 
@@ -248,7 +260,7 @@ stateDiagram-v2
 
 设置窗口为 560 × 480 pt 的固定尺寸普通窗口。它按需创建后复用；关闭窗口不终止应用。`present()` 刷新配置与登录状态并激活窗口，窗口再次成为 key window 时重新读取登录项状态。
 
-设置分为「切换提示 / 全屏常驻 / 鼠标跟随 / 通用」。`onChange` 更新中央背景，`onFullScreenChange` 更新常驻外观、位置和监测开关，`onMouseChange` 经 `AppDelegate.applyMouseSettings` 同步大小、整体透明度、静止秒数、行为及启用状态。只刷新被修改的分类，滑块量化后与旧值相同时跳过写入与回调。
+设置分为「切换提示 / 全屏常驻 / 鼠标跟随 / 通用」。`onChange` 更新中央背景，`onSwitchingChange` 经 `applySwitchingSettings` 同步中央停留时长与启用状态，`onFullScreenChange` 更新常驻外观、位置和监测开关，`onMouseChange` 经 `AppDelegate.applyMouseSettings` 同步大小、整体透明度、静止秒数、行为及启用状态。只刷新被修改的分类，滑块量化后与旧值相同时跳过写入与回调。
 
 「预览切换提示」回调进入现有浮层展示逻辑。中央重置仅恢复透明度、不重置停留时长；全屏重置大小和透明度、不重置位置；鼠标重置大小和透明度、不重置静止秒数及行为。所有外观重置均不更改启用开关和登录项。
 
@@ -290,7 +302,7 @@ dist/中英提示.app/Contents/
 └── _CodeSignature/…
 ```
 
-关键元数据：Bundle ID `local.yun.InputMethodPrompt`，版本 `1.11.0`，构建号 `29`，最低系统 `13.0`，`CFBundleIconFile=AppIcon.icns`。构建使用当前机器架构，未输出 Universal 二进制。
+关键元数据：Bundle ID `local.yun.InputMethodPrompt`，版本 `1.11.1`，构建号 `30`，最低系统 `13.0`，`CFBundleIconFile=AppIcon.icns`。构建使用当前机器架构，未输出 Universal 二进制。
 
 命令从项目根目录执行：
 
@@ -304,7 +316,7 @@ bash app/scripts/test.sh
 默认输出为 `dist/中英提示.app`；可通过 `INPUT_PROMPT_APP_DIR` 指定完整 `.app` 路径。例如保留版本化产物：
 
 ```sh
-INPUT_PROMPT_APP_DIR="$PWD/dist/1.11.0/中英提示.app" bash app/scripts/build-app.sh
+INPUT_PROMPT_APP_DIR="$PWD/dist/1.11.1/中英提示.app" bash app/scripts/build-app.sh
 ```
 
 脚本先在输出所在文件系统创建临时目录，完成打包和验签后才替换旧包；替换失败时尝试恢复旧包。按输出路径加目录锁，拒绝同目标并发构建。输出不是普通 `.app` 目录或存在符号链接时拒绝覆盖；回滚目标被其他进程占用时保留备份供核对。SIGKILL 或断电无法执行清理，可能遗留锁或备份。
@@ -317,7 +329,9 @@ INPUT_PROMPT_APP_DIR="$PWD/dist/1.11.0/中英提示.app" bash app/scripts/build-
 
 ### 11.1 已有证据
 
-当前 1.10.0 / 构建 28 的历史回执：常规及真实指针回归 311 项通过，临时展示专项通过，release 构建与签名校验通过。测试环境为 macOS 15.7.9、Apple Silicon。1.9.1 的性能专项、原生全屏 6 项及构建失败回滚验证见 [专项记录](PERFORMANCE_STABILITY.md)。上述为历史基线记录；1.11.0 新增时长配置验证见第 18 节，下表保留各项既有证据的边界。
+1.11.0 / 构建 29：本地停留时长专项 33 项、常规回归 344 项通过，release 构建与签名校验通过。合入 `main` 后，[GitHub Actions #35564417315](https://github.com/ChenYunerer/input_method_prompt_macos/actions/runs/35564417315) 的 `Build (arm64)`、`Build (x86_64)` 和 `Publish downloads` 均成功；源码与发布标签对应关系见第 18.1 节。这是 1.11.0 文档同步时的历史记录；本地 1.11.1 验证见第 19 节。
+
+1.10.0 / 构建 28 的历史回执：常规及真实指针回归 311 项通过，临时展示专项通过，release 构建与签名校验通过。测试环境为 macOS 15.7.9、Apple Silicon。1.9.1 的性能专项、原生全屏 6 项及构建失败回滚验证见 [专项记录](PERFORMANCE_STABILITY.md)。上述为历史基线记录；1.11.0 新增时长配置验证见第 18 节，下表保留各项既有证据的边界。
 
 | 验证方式 | 已证实内容 | 不能据此推断 |
 | --- | --- | --- |
@@ -358,7 +372,7 @@ TEST_SYSTEM_INPUT_SWITCH=1 bash app/scripts/test.sh
 1. 真实系统登录项注册与取消、系统批准流程及注销/重新登录。
 2. 物理 Caps Lock 短按、长按、快速连按，以及启用“Caps Lock 切换中英文”时的组合时序。
 3. 多屏、屏幕热插拔、全屏应用、不同 Space、唤醒后的表现。
-4. macOS 13/14、Intel 机器及其他输入法。
+4. macOS 13/14 真机及其他输入法；Intel 已通过 macOS 15 CI 常规回归与打包，日常交互、多屏及长期运行仍待实机验收。
 5. 长时间运行的 CPU、内存、定时器唤醒和能耗；已有重复样式与调度微基准，但尚无整机性能或端到端延迟的量化结论。
 
 ## 12. 维护约束与后续边界
@@ -660,7 +674,7 @@ CI 不声明完成真实登录启动、所有 macOS 版本或硬件的人工验�
 
 ## 18. 切换提示停留时长（1.11.0）
 
-`Overlay.defaultDuration = 1`，有效范围 0.1–10 秒；`clampedDuration` 统一范围保护和 0.1 秒取整。`AppSettings.switchingPromptDuration` 使用同名 UserDefaults 键，缺失或损坏时回到默认值，写入忽略非有限值。旧版本无此配置，升级后自然采用 1 秒，不修改其他已有偏好。
+`Overlay.defaultDuration = 1`，有效范围 0.1–10 秒；`clampedDuration` 统一范围保护和 0.1 秒取整。`AppSettings.switchingPromptDuration` 使用同名 UserDefaults 键，缺失、非数字或非有限值读取时回到默认值；有限越界值限制到边界，写入忽略非有限值。旧版本无此配置，升级后自然采用 1 秒，不修改其他已有偏好。
 
 设置页在透明度下方增加秒数输入框与步进器。合法输入在回车或结束编辑时保存，越界或无效文本恢复旧值；相同量化值不重复保存/回调。关闭切换提示时联动禁用两个控件；恢复默认外观保留时长。预览前结束文本编辑，确保使用刚保存的数值。
 
@@ -668,4 +682,49 @@ CI 不声明完成真实登录启动、所有 macOS 版本或硬件的人工验�
 
 本配置仅控制中央提示，鼠标临时展示仍固定停留 0.5 秒，三种模式的动画时长不变。`SelfCheck` 按新的默认时长验证完整显示与淡出。专项入口 `--switching-duration-only` 覆盖默认1秒、持久化、重建读取、控件同步、输入校验、重复回调去重、禁用保留、手动预览、当前轮快照、连续触发与淡出反转；该专项同时纳入常规测试入口。
 
-本次验证：停留时长专项 33 项 PASS，常规回归 344 项 PASS，失败数均为 0；1.11.0 / 构建 29 的 release 构建与签名校验通过，产物位于 `dist/1.11.0/中英提示.app`。本轮未执行真实注销登录或全部硬件兼容验收。
+功能交付时的本地验证：停留时长专项 33 项 PASS，常规回归 344 项 PASS，失败数均为 0；1.11.0 / 构建 29 的 release 构建与签名校验通过，产物位于 `dist/1.11.0/中英提示.app`。本轮未执行真实注销登录或全部硬件兼容验收。
+
+
+### 18.1 合入、安装与发布回执
+
+| 项目 | 已核实结果 |
+| --- | --- |
+| 合并结果 | `feat/switching-prompt-duration` 快进合入 `main`，提交 [76e5a0a](https://github.com/ChenYunerer/input_method_prompt_macos/commit/76e5a0abdcc1353331cb34ba274fa22f35f4d44b)，无冲突 |
+| 自动化运行 | [GitHub Actions #35564417315](https://github.com/ChenYunerer/input_method_prompt_macos/actions/runs/35564417315)，结论 `success` |
+| 发布 | [1.11.0 · build 29 · CI 2.1](https://github.com/ChenYunerer/input_method_prompt_macos/releases/tag/ci-35564417315-1)，标签 `ci-35564417315-1`，非草稿 |
+| 发布目标 | `76e5a0abdcc1353331cb34ba274fa22f35f4d44b` |
+| 应用元数据 | `CFBundleShortVersionString=1.11.0`，`CFBundleVersion=29` |
+| 本地安装 | `/Applications/中英提示.app`，签名校验通过，正常启动并确认单个新版本进程 |
+| 配置继承 | 重启前后 9 项已有偏好一致；未保存 `switchingPromptDuration` 时有效值为 1 秒 |
+
+下载文件名主体为 `InputMethodPrompt-v1.11.0-build29-ci2.1-76e5a0abdcc1-<架构>`，两个架构分别为 `arm64`、`x86_64`，各提供 `.zip`、`.json`、`.sha256`。已核对 Release 附件清单与目标提交，发布流程中的双架构版本/提交/批次/校验和检查全部成功。
+
+此版本仍为临时签名，未公证。双架构 CI 成功与本机重启检查，不替代系统登录启动、macOS 13/14、所有外部全屏应用和长期运行的实机验收。
+
+
+## 19. 输入状态可靠性（本地 1.11.1）
+
+在 `fix/input-state-reliability` 分支实现，基于 1.11.0 / `76e5a0a`。本轮定位到可复现的漏通知缺口：将读取结果从中文改成英文，保持 Caps Lock 不变且不发送通知，旧实现等待 2.5 秒仍未纠正。添加回归后先观察到 FAIL，再补充低频校准及生命周期刷新。
+
+- 默认每 2 秒读取并确认，0.2 秒容差；确认/恢复期间不叠加周期读取。Caps Lock 仍为 80 ms 轻量轮询，100/250 ms 防闪确认与失败后 0.5 秒恢复保持原规则。
+- 应用激活、Space 切换、系统/屏幕唤醒、会话恢复通知接入同一个合并入口。后台通知转到主线程，重复通知不重复发布。
+- 源快照保留公开模式 ID 等属性，用于状态比较和诊断；不把 ASCII 能力或底层键盘布局解释为当前英文状态。
+- 通用页可复制诊断；`--diagnose` 使用同一报告格式。系统元数据缺失与读取失败均明确标注，报告只包含采集时刻的信息。
+- 测试注入独立输入源及 workspace 通知中心；精确读取计数测试隔离周期校准，校准与通知交错在独立用例覆盖，避免桌面操作污染测试结果。
+
+本地应用产物：`dist/1.11.1/中英提示.app`，版本 1.11.1 / 构建 30。已安装到 `/Applications/中英提示.app` 并重启，安装前后 11 项已有偏好保持一致。代码通过 `fix/input-state-reliability` 功能分支交付，未合入主分支或发布；该分支推送不触发仅面向 `main/master` 的自动构建发布流程。
+
+Issue #1 的输入法产品/版本及切换路径仍未齐全。本轮修复的是经测试复现的状态残留问题，不能据此宣称原 Issue 已修复；第三方未公开内部模式仍需单独调查。此轮未执行真实注销登录、物理睡眠唤醒、Intel 或 macOS 13/14 真机验收。
+
+验证回执（2026-09-22，macOS 15.7.9 / Apple Silicon）：
+
+| 验证 | 结果 |
+| --- | --- |
+| 旧代码 + 漏通知回归 | 1 项 FAIL，复现等待 2.5 秒仍为旧状态 |
+| `bash app/scripts/test.sh --input-state-only` | 29 项 PASS，0 FAIL |
+| `bash app/scripts/test.sh` | 最终全量 361 项 PASS，0 FAIL；包含校准、生命周期、通知合并、失败恢复与防闪用例 |
+| `INPUT_PROMPT_APP_DIR="$PWD/dist/1.11.1/中英提示.app" bash app/scripts/build-app.sh` | release 构建成功，arm64 |
+| `codesign --verify --strict 'dist/1.11.1/中英提示.app'` | 通过 |
+| 新包 `--diagnose` | 退出码 0，可读取实际输入源的公开元数据，不代表验证了其内部中英文切换 |
+
+单元测试覆盖模拟通知与可控读取结果；不把这些结果当作物理休眠、注销、第三方输入法或全部硬件兼容的实测证明。

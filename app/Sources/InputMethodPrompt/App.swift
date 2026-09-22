@@ -17,7 +17,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         onPreview: { [weak self] in self?.preview() },
         onFullScreenChange: { [weak self] in self?.applyFullScreenSettings() },
         onSwitchingChange: { [weak self] in self?.applySwitchingSettings() },
-        onMouseChange: { [weak self] in self?.applyMouseSettings() }
+        onMouseChange: { [weak self] in self?.applyMouseSettings() },
+        diagnosticsProvider: { [weak self] in
+            InputDiagnostics.report(observed: InputState.current(), confirmed: self?.monitor.current)
+        }
     )
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -106,12 +109,9 @@ enum Main {
             exit(SelfCheck.run())
         }
         if CommandLine.arguments.contains("--diagnose") {
-            if let source = InputSource.current() {
-                print("当前输入源：\(source.id) | \(source.name) | \(source.languages) | \(source.symbol) | Caps Lock: \(InputState.capsLockEnabled())")
-            } else {
-                print("无法读取当前输入源")
-                exit(1)
-            }
+            let observed = InputState.current()
+            print(InputDiagnostics.report(observed: observed))
+            if observed == nil { exit(1) }
             return
         }
         if let bundleID = Bundle.main.bundleIdentifier,

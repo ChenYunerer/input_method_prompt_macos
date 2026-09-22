@@ -1,11 +1,26 @@
 import Carbon
-import Foundation
+import AppKit
 import CoreGraphics
 
 struct InputSource: Equatable {
     let id: String
     let name: String
     let languages: [String]
+    let inputModeID: String?
+    let bundleID: String?
+    let sourceType: String?
+    let isASCIICapable: Bool?
+
+    init(id: String, name: String, languages: [String], inputModeID: String? = nil,
+         bundleID: String? = nil, sourceType: String? = nil, isASCIICapable: Bool? = nil) {
+        self.id = id
+        self.name = name
+        self.languages = languages
+        self.inputModeID = inputModeID
+        self.bundleID = bundleID
+        self.sourceType = sourceType
+        self.isASCIICapable = isASCIICapable
+    }
 
     var language: String {
         (languages.first ?? "").replacingOccurrences(of: "_", with: "-")
@@ -39,7 +54,11 @@ struct InputSource: Equatable {
         guard let id: String = property(kTISPropertyInputSourceID),
               let name: String = property(kTISPropertyLocalizedName) else { return nil }
         return InputSource(id: id, name: name,
-                           languages: property(kTISPropertyInputSourceLanguages) ?? [])
+                           languages: property(kTISPropertyInputSourceLanguages) ?? [],
+                           inputModeID: property(kTISPropertyInputModeID),
+                           bundleID: property(kTISPropertyBundleID),
+                           sourceType: property(kTISPropertyInputSourceType),
+                           isASCIICapable: property(kTISPropertyInputSourceIsASCIICapable))
     }
 
     static func current() -> InputSource? {
@@ -66,12 +85,51 @@ struct InputState: Equatable {
     }
 }
 
+enum InputDiagnostics {
+    static func report(observed: InputState?, confirmed: InputState? = nil) -> String {
+        func describe(_ state: InputState?) -> String {
+            guard let state else { return "不可用" }
+            let source = state.source
+            return """
+            输入源：\(source.name)
+            ID：\(source.id)
+            语言：\(source.languages.joined(separator: ", "))
+            模式 ID：\(source.inputModeID ?? "系统未提供")
+            Bundle ID：\(source.bundleID ?? "系统未提供")
+            类型：\(source.sourceType ?? "系统未提供")
+            ASCII 能力（非当前英文模式）：\(source.isASCIICapable.map(String.init) ?? "系统未提供")
+            Caps Lock：\(state.capsLock)
+            标识：\(state.symbol)
+            """
+        }
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未打包"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未打包"
+        return """
+        中英提示诊断 · \(version) (\(build))
+        系统：\(ProcessInfo.processInfo.operatingSystemVersionString)
+        时间：\(ISO8601DateFormatter().string(from: Date()))
+
+        最近确认状态：
+        \(describe(confirmed))
+
+        本次即时读取（尚未经防闪确认）：
+        \(describe(observed))
+
+        识别边界：提示依据系统公开的输入源与语言；输入法未公开的内部中英文模式无法可靠识别。
+        此信息仅反映采集时刻，不记录输入内容。反馈时请补充输入法版本、切换按键与复现步骤。
+        """
+    }
+}
+
 final class InputSourceMonitor: NSObject {
     private(set) var current: InputState?
     var onChange: ((InputState) -> Void)?
     private var capsLockTimer: Timer?
     private var settlingTimer: Timer?
     private var recoveryTimer: Timer?
+    private var reconciliationTimer: Timer?
+    private let sourceNotifications: NotificationCenter
+    private let workspaceNotifications: NotificationCenter
     private var pending: InputState?
     private var lastObservedCapsLock = false
     private var refreshScheduled = false
@@ -79,17 +137,25 @@ final class InputSourceMonitor: NSObject {
     private let readCapsLock: () -> Bool
 
     init(readState: @escaping () -> InputState? = InputState.current,
-         readCapsLock: @escaping () -> Bool = InputState.capsLockEnabled) {
+         readCapsLock: @escaping () -> Bool = InputState.capsLockEnabled,
+         sourceNotifications: NotificationCenter = DistributedNotificationCenter.default(),
+         workspaceNotifications: NotificationCenter = NSWorkspace.shared.notificationCenter,
+         reconciliationInterval: TimeInterval = 2) {
+        precondition(reconciliationInterval.isFinite && reconciliationInterval > 0)
         self.readState = readState
         self.readCapsLock = readCapsLock
+        self.sourceNotifications = sourceNotifications
+        self.workspaceNotifications = workspaceNotifications
         super.init()
         current = readState()
         lastObservedCapsLock = current?.capsLock ?? readCapsLock()
-        DistributedNotificationCenter.default().addObserver(
-            self, selector: #selector(sourceChanged),
-            name: Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String),
-            object: nil, suspensionBehavior: .deliverImmediately
-        )
+        let sourceNotification = Notification.Name(kTISNotifySelectedKeyboardInputSourceChanged as String)
+        if let distributed = sourceNotifications as? DistributedNotificationCenter {
+            distributed.addObserver(self, selector: #selector(sourceChanged), name: sourceNotification,
+                                    object: nil, suspensionBehavior: .deliverImmediately)
+        } else {
+            sourceNotifications.addObserver(self, selector: #selector(sourceChanged), name: sourceNotification, object: nil)
+        }
         // Read only the modifier state, without capturing keystrokes or typed text.
         let timer = Timer(timeInterval: 0.08, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -103,6 +169,22 @@ final class InputSourceMonitor: NSObject {
         timer.tolerance = 0.015
         capsLockTimer = timer
         RunLoop.main.add(timer, forMode: .common)
+        // Some application/session changes do not deliver a TIS notification.
+        // All triggers share the same coalescing and confirmation path.
+        for name in [NSWorkspace.didActivateApplicationNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification,
+                     NSWorkspace.didWakeNotification,
+                     NSWorkspace.screensDidWakeNotification,
+                     NSWorkspace.sessionDidBecomeActiveNotification] {
+            workspaceNotifications.addObserver(self, selector: #selector(sourceChanged), name: name, object: nil)
+        }
+        let reconciliation = Timer(timeInterval: reconciliationInterval, repeats: true) { [weak self] _ in
+            guard let self, self.pending == nil, self.recoveryTimer == nil else { return }
+            self.scheduleRefresh()
+        }
+        reconciliation.tolerance = reconciliationInterval * 0.1
+        reconciliationTimer = reconciliation
+        RunLoop.main.add(reconciliation, forMode: .common)
         if current == nil { scheduleRecovery() }
     }
 
@@ -195,7 +277,9 @@ final class InputSourceMonitor: NSObject {
     deinit {
         capsLockTimer?.invalidate()
         recoveryTimer?.invalidate()
+        reconciliationTimer?.invalidate()
         cancelPending()
-        DistributedNotificationCenter.default().removeObserver(self)
+        workspaceNotifications.removeObserver(self)
+        sourceNotifications.removeObserver(self)
     }
 }
