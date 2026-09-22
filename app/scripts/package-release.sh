@@ -4,7 +4,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORKSPACE_DIR="$(cd "$PROJECT_DIR/.." && pwd)"
 OUTPUT_DIR="$WORKSPACE_DIR/dist/releases"
 ARCH="$(uname -m)"
-case "$ARCH" in arm64|x86_64) ;; *) printf '不支持的架构：%s\n' "$ARCH" >&2; exit 1 ;; esac
+case "$ARCH" in arm64) ;; *) printf '仅支持 Apple Silicon（arm64）打包，当前架构：%s\n' "$ARCH" >&2; exit 1 ;; esac
 COMMIT="$(git -C "$WORKSPACE_DIR" rev-parse HEAD)"
 BUILD_ID="${CI_BUILD_ID:-local}"
 if [[ ! "$BUILD_ID" =~ ^[A-Za-z0-9.-]+$ ]]; then

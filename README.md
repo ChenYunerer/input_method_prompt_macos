@@ -24,12 +24,7 @@
 
 ## 下载与安装
 
-要求 **macOS 13 或更高版本**。在苹果菜单 →「关于本机」中查看芯片类型，然后从 [Releases](https://github.com/ChenYunerer/input_method_prompt_macos/releases/latest) 的 **Assets** 下载对应 ZIP：
-
-| 你的 Mac | 下载文件后缀 |
-| --- | --- |
-| Apple Silicon，M 系列芯片 | `-arm64.zip` |
-| Intel 处理器 | `-x86_64.zip` |
+要求 **Apple Silicon（M 系列芯片）及 macOS 13 或更高版本**。从 [Releases](https://github.com/ChenYunerer/input_method_prompt_macos/releases/latest) 的 **Assets** 下载以 `-arm64.zip` 结尾的文件。当前仅构建和支持 M 系列芯片，历史版本中的 Intel 下载包不再更新。
 
 1. 解压 ZIP，将 **中英提示.app** 拖到「应用程序」。
 2. 双击启动，菜单栏会显示当前输入状态；应用不常驻 Dock。
@@ -113,7 +108,7 @@
 
 全屏识别依据可见窗口几何，可能把隐藏菜单栏和 Dock 后恰好铺满屏幕的普通窗口识别为全屏。特殊游戏、自绘透明指针、多显示器组合及不同系统版本仍存在兼容边界。系统指针隐藏检测依赖可选的旧系统接口；不可用时设置页会说明，静止功能继续工作。
 
-双架构构建成功不等于所有 macOS 13+ 设备都完成了实机验收。详细测试依据和未验证场景见 [PRD 验收清单](app/docs/PRD.md) 和 [性能与稳定性记录](app/docs/PERFORMANCE_STABILITY.md)。
+Apple Silicon 构建成功不等于所有 M 系列芯片和 macOS 13+ 系统版本都完成了实机验收。详细测试依据和未验证场景见 [PRD 验收清单](app/docs/PRD.md) 和 [性能与稳定性记录](app/docs/PERFORMANCE_STABILITY.md)。
 
 ## 从源码构建
 
@@ -174,9 +169,9 @@ TEST_SYSTEM_INPUT_SWITCH=1 bash app/scripts/test.sh # 切换并恢复系统输�
 配置入口：[`.github/workflows/build-release.yml`](.github/workflows/build-release.yml)。GitHub 要求工作流放在仓库根目录的 `.github/workflows/`；构建和发布脚本仍放在 `app/scripts/`。
 
 1. 每次向 `main` 或 `master` **push**，构建该次 push 最终提交的完整源码；也支持在 Actions 页面手动运行这两个分支。一次 push 含多个 commit 时只构建该 push 的最终提交。
-2. 使用 macOS 15 的 Apple Silicon 与 Intel runner，分别执行常规回归、release 编译、应用签名和打包校验。
-3. 将两个架构的 ZIP、JSON 元数据和 SHA-256 文件上传为 Actions Artifacts，保留 30 天；测试日志保留 14 天。
-4. 两个架构均成功后，核对版本、提交和构建批次，创建独立的 GitHub Release，上传完整附件后公开。任一架构失败则不发布下载版本。
+2. 仅使用 macOS 15 的 Apple Silicon runner，执行发布校验测试、常规回归、release 编译、应用签名和打包校验。
+3. 将 arm64 的 ZIP、JSON 元数据和 SHA-256 文件上传为 Actions Artifacts，保留 30 天；测试日志保留 14 天。
+4. arm64 构建成功后，核对架构、版本、提交、构建批次和校验和，创建独立的 GitHub Release，上传完整附件后公开。测试、构建或校验失败时不发布；拒绝混入旧版或其他架构附件。
 5. 默认分支当前最新提交的成功构建标记为 Latest；其他分支或较早提交保留独立下载页，不覆盖默认分支的最新入口。应用本身不会自动升级。
 
 Release 标签格式为 `ci-运行ID-重试序号`。下载文件包含应用版本、应用构建号、CI 批次、12 位提交 SHA 和架构，例如：

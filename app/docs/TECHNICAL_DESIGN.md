@@ -2,12 +2,12 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 实现基线 | 本地 1.11.1 / 构建号 30，分支 `fix/input-state-reliability`；基于 `main` 提交 [76e5a0a](https://github.com/ChenYunerer/input_method_prompt_macos/commit/76e5a0abdcc1353331cb34ba274fa22f35f4d44b) |
+| 实现基线 | 1.11.1 / 构建号 30；P0 已合入 `main`（`1d443e6`），当前发布策略为仅 arm64 |
 | 整理日期 | 2026-09-22 |
 | 需求基线 | [PRD](PRD.md) |
 | 源码仓库 | [ChenYunerer/input_method_prompt_macos](https://github.com/ChenYunerer/input_method_prompt_macos)，公开仓库，默认分支 `main` |
-| 本轮范围 | 输入状态低频校准、应用/会话切换后刷新、公开模式元数据、诊断入口；仅本地实现 |
-| 发布版本 | [1.11.0 · build 29 · CI 2.1](https://github.com/ChenYunerer/input_method_prompt_macos/releases/tag/ci-35564417315-1)，2026-09-21 发布 |
+| 本轮范围 | P0 输入状态可靠性；自动构建与发布仅支持 Apple Silicon |
+| 下载入口 | [最新构建](https://github.com/ChenYunerer/input_method_prompt_macos/releases/latest)，历史回执见第 18、19 节 |
 
 第 1–14 节描述当前实现；第 15 节及第 16 节保留演进过程，版本标题下的旧行为仅用于解释改动。当前鼠标显示策略以第 16.9–16.12 节和 PRD 为准，验证记录注明其所属版本；1.11.1 的输入状态可靠性验证见第 19 节。
 
@@ -321,7 +321,7 @@ INPUT_PROMPT_APP_DIR="$PWD/dist/1.11.1/中英提示.app" bash app/scripts/build-
 
 脚本先在输出所在文件系统创建临时目录，完成打包和验签后才替换旧包；替换失败时尝试恢复旧包。按输出路径加目录锁，拒绝同目标并发构建。输出不是普通 `.app` 目录或存在符号链接时拒绝覆盖；回滚目标被其他进程占用时保留备份供核对。SIGKILL 或断电无法执行清理，可能遗留锁或备份。
 
-脚本不自动退出或重新启动运行中的应用。临时签名不等于 Developer ID 签名或 Apple 公证，通过 GitHub Actions 分别生成 Apple Silicon 和 Intel 下载包并发布 Release；没有自动更新或跨架构 Universal 构建流程。
+脚本不自动退出或重新启动运行中的应用。临时签名不等于 Developer ID 签名或 Apple 公证，通过 GitHub Actions 仅生成 Apple Silicon（arm64）下载包并发布 Release；没有自动更新或跨架构 Universal 构建流程。
 
 公开仓库仅维护源码、测试、脚本、图标源文件和文档。`.gitignore` 排除 `.build/`、`.build-previous/`、`dist/` 和 `.DS_Store`；仓库更名不改变应用名、Bundle ID 或本地偏好域。
 
@@ -372,7 +372,7 @@ TEST_SYSTEM_INPUT_SWITCH=1 bash app/scripts/test.sh
 1. 真实系统登录项注册与取消、系统批准流程及注销/重新登录。
 2. 物理 Caps Lock 短按、长按、快速连按，以及启用“Caps Lock 切换中英文”时的组合时序。
 3. 多屏、屏幕热插拔、全屏应用、不同 Space、唤醒后的表现。
-4. macOS 13/14 真机及其他输入法；Intel 已通过 macOS 15 CI 常规回归与打包，日常交互、多屏及长期运行仍待实机验收。
+4. macOS 13/14 真机及其他输入法；Apple Silicon 的日常交互、多屏及长期运行仍待更多实机验收；当前不再支持 Intel。
 5. 长时间运行的 CPU、内存、定时器唤醒和能耗；已有重复样式与调度微基准，但尚无整机性能或端到端延迟的量化结论。
 
 ## 12. 维护约束与后续边界
@@ -661,11 +661,11 @@ AppDelegate 启动时先将当前确认状态传给标识，再开启全屏监�
 
 ## 17. GitHub Actions 构建与下载
 
-[工作流](../../.github/workflows/build-release.yml) 在 `main` / `master` push 或这两个分支手动触发时，检出事件对应的精确提交；两个原生 macOS 15 runner 分别构建 arm64 / x86_64。一次 push 只构建最终提交，不逐个构建其中的中间 commit。工作流不配置取消前序运行，也不通过路径过滤跳过文档提交。
+[工作流](../../.github/workflows/build-release.yml) 在 `main` / `master` push 或这两个分支手动触发时，检出事件对应的精确提交；仅使用原生 Apple Silicon `macos-15` runner 构建 arm64，并校验 `uname -m`。一次 push 只构建最终提交，不逐个构建其中的中间 commit。工作流不配置取消前序运行，也不通过路径过滤跳过文档提交。
 
-每个构建任务运行常规回归，再调用 `package-release.sh` 在临时目录构建并验签，使用 ditto 保留应用包及可执行权限，解压复核签名，生成 ZIP、JSON 元数据和 SHA-256 文件。应用版本 / 构建号读取实际 Info.plist，文件名另带 CI 批次及提交 SHA。两个架构的应用版本保持一致，不因普通提交自动增加语义版本。
+构建任务先运行发布校验测试与常规回归，再调用 `package-release.sh` 在临时目录构建并验签，使用 ditto 保留应用包及可执行权限，解压复核签名，生成 ZIP、JSON 元数据和 SHA-256 文件。应用版本 / 构建号读取实际 Info.plist，文件名另带 CI 批次及提交 SHA。不因普通提交或调整 CI 架构自动增加应用语义版本。`package-release.sh` 在非 arm64 主机上直接拒绝打包。
 
-发布任务必须等待两个构建成功；下载本次运行的产物后核对双架构、版本、提交、批次和校验和。使用独立 `ci-运行ID-重试序号` 标签，先创建带全部附件的草稿，再公开。上传失败不会公开不完整草稿；失败回执需先查询现状，修复后可重跑工作流。默认分支当前 HEAD 的成功构建标记 Latest，旧提交或非默认分支不覆盖最新入口。
+发布任务等待 arm64 构建成功；只下载名为 `release-arm64` 的产物，要求且仅允许一套 arm64 ZIP / JSON / SHA-256 附件，核对版本、提交、批次和 ZIP、JSON 的完整校验和。额外旧附件或其他架构均在调用 GitHub 前拒绝。使用独立 `ci-运行ID-重试序号` 标签，先创建带全部附件的草稿，再公开。上传失败不会公开不完整草稿；失败回执需先查询现状，修复后可重跑工作流。默认分支当前 HEAD 的成功构建标记 Latest，旧提交或非默认分支不覆盖最新入口。
 
 仅发布任务拥有 `contents: write`；构建任务为只读，checkout 不保留凭据，官方 Actions 固定到提交 SHA。无需个人令牌、Developer ID 证书或公证密钥。Actions 下载产物保留 30 天、测试日志 14 天，Release 附件供长期下载（除非手动删除）。下载与安装说明以 [根 README](../../README.md) 为入口。
 
@@ -702,7 +702,7 @@ CI 不声明完成真实登录启动、所有 macOS 版本或硬件的人工验�
 此版本仍为临时签名，未公证。双架构 CI 成功与本机重启检查，不替代系统登录启动、macOS 13/14、所有外部全屏应用和长期运行的实机验收。
 
 
-## 19. 输入状态可靠性（本地 1.11.1）
+## 19. 输入状态可靠性（1.11.1）
 
 在 `fix/input-state-reliability` 分支实现，基于 1.11.0 / `76e5a0a`。本轮定位到可复现的漏通知缺口：将读取结果从中文改成英文，保持 Caps Lock 不变且不发送通知，旧实现等待 2.5 秒仍未纠正。添加回归后先观察到 FAIL，再补充低频校准及生命周期刷新。
 
@@ -712,7 +712,7 @@ CI 不声明完成真实登录启动、所有 macOS 版本或硬件的人工验�
 - 通用页可复制诊断；`--diagnose` 使用同一报告格式。系统元数据缺失与读取失败均明确标注，报告只包含采集时刻的信息。
 - 测试注入独立输入源及 workspace 通知中心；精确读取计数测试隔离周期校准，校准与通知交错在独立用例覆盖，避免桌面操作污染测试结果。
 
-本地应用产物：`dist/1.11.1/中英提示.app`，版本 1.11.1 / 构建 30。已安装到 `/Applications/中英提示.app` 并重启，安装前后 11 项已有偏好保持一致。代码通过 `fix/input-state-reliability` 功能分支交付，未合入主分支或发布；该分支推送不触发仅面向 `main/master` 的自动构建发布流程。
+本地应用产物：`dist/1.11.1/中英提示.app`，版本 1.11.1 / 构建 30。已安装到 `/Applications/中英提示.app` 并重启，安装前后 11 项已有偏好保持一致。代码由 `fix/input-state-reliability` 快进合入 `main`，提交 `1d443e6`；[CI #35686511326](https://github.com/ChenYunerer/input_method_prompt_macos/actions/runs/35686511326) 按当时的双架构策略全部成功，发布 [1.11.1 / build 30 / CI 3.1](https://github.com/ChenYunerer/input_method_prompt_macos/releases/tag/ci-35686511326-1)。随后按用户要求将第 17 节构建策略收敛为仅 arm64；旧 Intel 附件保留为历史记录。
 
 Issue #1 的输入法产品/版本及切换路径仍未齐全。本轮修复的是经测试复现的状态残留问题，不能据此宣称原 Issue 已修复；第三方未公开内部模式仍需单独调查。此轮未执行真实注销登录、物理睡眠唤醒、Intel 或 macOS 13/14 真机验收。
 
@@ -728,3 +728,6 @@ Issue #1 的输入法产品/版本及切换路径仍未齐全。本轮修复的�
 | 新包 `--diagnose` | 退出码 0，可读取实际输入源的公开元数据，不代表验证了其内部中英文切换 |
 
 单元测试覆盖模拟通知与可控读取结果；不把这些结果当作物理休眠、注销、第三方输入法或全部硬件兼容的实测证明。
+
+
+仅 arm64 发布策略的本地验证：`python3 app/Tests/test_release_pipeline.py` 的 9 项用例通过，覆盖单架构成功、Intel / 双架构拒绝、旧附件混入、提交 / 批次不符、损坏 ZIP、缺失元数据校验和及 Intel 主机提前终止打包；使用假的 `gh`，没有进行真实发布。Shell 语法与 actionlint 校验通过。

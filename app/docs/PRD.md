@@ -3,12 +3,12 @@
 | 项目 | 内容 |
 | --- | --- |
 | 产品 | 中英提示 / InputMethodPrompt |
-| 版本基线 | 本地 1.11.1，构建号 30；已发布版本为 1.11.0 / 29 |
+| 版本基线 | 1.11.1，构建号 30；当前构建和支持范围为 Apple Silicon（arm64） |
 | 整理日期 | 2026-09-22 |
-| 文档性质 | 在已发布基线上补充 P0 输入状态可靠性优化，功能分支交付，未合入主分支或发布 |
+| 文档性质 | P0 已合入主分支；同步仅构建和支持 M 系列芯片的发布策略 |
 | 源码仓库 | [ChenYunerer/input_method_prompt_macos](https://github.com/ChenYunerer/input_method_prompt_macos)，公开仓库，默认分支 `main` |
-| 源码基线 | 功能分支 `fix/input-state-reliability`；基于 `main` 提交 [76e5a0a](https://github.com/ChenYunerer/input_method_prompt_macos/commit/76e5a0abdcc1353331cb34ba274fa22f35f4d44b) |
-| 发布版本 | [1.11.0 · build 29 · CI 2.1](https://github.com/ChenYunerer/input_method_prompt_macos/releases/tag/ci-35564417315-1)，2026-09-21 发布 |
+| 源码基线 | `main`；P0 提交 [1d443e6](https://github.com/ChenYunerer/input_method_prompt_macos/commit/1d443e6d9bc232bc7507d5806dfe974efd9bb5a7)，后续调整构建架构 |
+| 下载入口 | [最新构建](https://github.com/ChenYunerer/input_method_prompt_macos/releases/latest)，历史发布证据见第 8 节 |
 | 关联文档 | [技术方案](TECHNICAL_DESIGN.md) · [使用与构建说明](../README.md) |
 
 ## 1. 背景与目标
@@ -273,10 +273,10 @@ macOS 菜单栏中的输入法标识不够醒目。用户在中文、英文间�
 
 | 项目 | 当前基线 |
 | --- | --- |
-| 系统 | 声明支持 macOS 13+；已使用 macOS 15.7.9、Apple Silicon 验证 |
+| 系统 | Apple Silicon（M 系列芯片）、macOS 13+；已使用 macOS 15.7.9、Apple Silicon 验证 |
 | 输入权限 | 当前实现不请求辅助功能、输入监控或屏幕录制权限 |
 | 数据 | 不记录输入内容，不采集完整按键，不联网；本地保存三个提示开关、切换提示停留时长、两种背景透明度、常驻大小与位置、鼠标提示大小、整体透明度、静止时长和静止行为；不保存鼠标轨迹 |
-| 安装形态 | 本地或 GitHub Actions 构建的 `.app`；Releases 分别提供 Apple Silicon / Intel ZIP 下载包，临时签名，尚未 Apple 公证或商店分发 |
+| 安装形态 | 本地或 GitHub Actions 构建的 `.app`；Releases 提供 Apple Silicon / arm64 ZIP 下载包，临时签名，尚未 Apple 公证或商店分发 |
 | 性能 | 事件合并、屏幕同步跟随、重复布局去重、静止隐藏后暂停指针可见性查询；已有局部微基准，尚无整机 CPU、内存、能耗或端到端延迟结论 |
 | 设置继承 | 提示开关、外观及常驻位置由本地偏好保存，自动启动以系统状态为准 |
 
@@ -320,14 +320,14 @@ macOS 菜单栏中的输入法标识不够醒目。用户在中文、英文间�
 
 ## 7. 后续事项
 
-当前需要补充验证的是实际登录启动、实体 Caps Lock 组合场景、多屏及全屏兼容、性能和能耗。macOS 13/14 真机尚未完成兼容测试；Intel 已通过 macOS 15 CI 常规回归与构建，仍需补充真实用户桌面上的体验验收。
+当前需要补充验证的是实际登录启动、实体 Caps Lock 组合场景、多屏及全屏兼容、性能和能耗。macOS 13/14 真机尚未完成兼容测试；当前仅支持 Apple Silicon；历史 Intel CI 记录不代表继续提供 Intel 适配。
 
 自由拖拽位置、第三方输入法内部模式、鼠标临时展示时长设置和正式签名分发均未纳入当前交付承诺，后续有需求时再明确范围。
 
 
 ## 8. 自动构建与下载交付
 
-`main` / `master` 每次 push 后自动构建该次提交的最终源码，通过双架构常规回归、构建、签名和打包校验后提供 GitHub Release 下载。两个架构必须全部成功才发布；下载页展示源码提交、应用版本和 CI 批次，便于定位问题。默认分支最新提交的成功构建作为最新下载入口。安装、更新和首次启动说明见 [README](../../README.md)。
+`main` / `master` 每次 push 后自动构建该次提交的最终源码，通过 arm64 发布校验测试、常规回归、构建、签名和打包校验后提供 GitHub Release 下载。仅发布一套 arm64 的 ZIP、JSON 和 SHA-256 文件；下载页展示源码提交、应用版本和 CI 批次，便于定位问题。默认分支最新提交的成功构建作为最新下载入口。安装、更新和首次启动说明见 [README](../../README.md)。
 
 下载包使用临时签名，提供 ZIP、构建元数据与 SHA-256 校验文件；用户自行下载安装更新。自动构建成功不替代全设备兼容或正式公证验收。
 
@@ -346,10 +346,10 @@ macOS 菜单栏中的输入法标识不够醒目。用户在中文、英文间�
 此处记录本次已验证的固定版本；后续主分支提交触发的新构建可从 [最新下载入口](https://github.com/ChenYunerer/input_method_prompt_macos/releases/latest) 获取。
 
 
-### 8.2 本地 1.11.1：P0 输入状态可靠性
+### 8.2 1.11.1：P0 输入状态可靠性
 
 功能分支 `fix/input-state-reliability` 在已发布版本之上新增状态校准、生命周期重新确认、公开模式变化识别与诊断入口。三处提示共用同一状态更新链路；不改变已有外观、开关和动画设置。
 
 已用自动化用例复现并修复“漏输入源通知且 Caps Lock 不变时持续显示旧中文状态”。Issue #1 未提供完整输入法环境，尚未确认与此缺口同因，仍保持待验证。第三方输入法未公开的内部模式不在本轮支持范围内。
 
-本地验证：输入状态专项 29 项、常规全量 361 项全部通过，失败数均为 0；release 构建与签名校验通过。生成 1.11.1 / 构建 30 Apple Silicon 应用包；已安装到 `/Applications/中英提示.app` 并重启，11 项已有偏好保持一致。尚未合入主分支或发布。此前 1.11.0 的安装、双架构 CI 与发布回执仅代表历史版本。
+本地验证：输入状态专项 29 项、常规全量 361 项全部通过，失败数均为 0；release 构建与签名校验通过。生成 1.11.1 / 构建 30 Apple Silicon 应用包；已安装到 `/Applications/中英提示.app` 并重启，11 项已有偏好保持一致。P0 已合入 `main`（`1d443e6`），[CI #35686511326](https://github.com/ChenYunerer/input_method_prompt_macos/actions/runs/35686511326) 在旧双架构策略下构建并发布成功。该次及此前的 Intel 下载包属于历史产物；后续只构建 arm64。

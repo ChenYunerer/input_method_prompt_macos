@@ -88,10 +88,11 @@ Caps Lock 通过 `CGEventSource.flagsState(.combinedSessionState)` 每 80 毫秒
 
 ## 自动构建与打包
 
-每次 `main` / `master` push，由 [工作流](../.github/workflows/build-release.yml) 构建最终提交的 Apple Silicon 与 Intel 应用；常规回归、签名与 ZIP 校验通过后发布 [GitHub Releases](https://github.com/ChenYunerer/input_method_prompt_macos/releases)。
+每次 `main` / `master` push，由 [工作流](../.github/workflows/build-release.yml) 仅构建最终提交的 Apple Silicon（M 系列 / arm64）应用；常规回归、签名与 ZIP 校验通过后发布 [GitHub Releases](https://github.com/ChenYunerer/input_method_prompt_macos/releases)。
 
 - `scripts/package-release.sh`：复用本地构建脚本，在临时目录生成应用；输出版本化 ZIP、构建元数据与 SHA-256 到 `dist/releases/`。
-- `scripts/publish-release.sh`：用于 CI，校验两个架构的版本、源码提交、批次和校验和，再上传 Release 附件并发布。需要工作流注入 GitHub 上下文及 `GH_TOKEN`。
+- `scripts/publish-release.sh`：用于 CI，要求且仅接受一套完整 arm64 附件，校验版本、源码提交、批次和 ZIP / JSON 校验和，再上传 Release 附件并发布。需要工作流注入 GitHub 上下文及 `GH_TOKEN`。
+- `python3 Tests/test_release_pipeline.py`：本地模拟发布成功及错误架构、混入旧附件、提交/批次不符、校验失败，不调用真实 GitHub。
 - 应用版本 / 构建号仍由 `build-app.sh` 的 Info.plist 字段维护；CI 批次与提交 SHA 区分持续构建，不自动改写源码中的版本。
 - 图形集成测试需在本机按需执行；CI 执行常规回归，不切换真实系统输入源、全屏桌面或指针可见性。
 
