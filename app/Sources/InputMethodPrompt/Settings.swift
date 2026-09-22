@@ -132,8 +132,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private let onSwitchingChange: () -> Void
     private let onMouseChange: () -> Void
     private let loginItem: LoginItemManaging
-    private let diagnosticsProvider: () -> String
-    private let diagnosticsStatus = NSTextField(labelWithString: "不包含输入内容；不会自动上传。")
     private let switchingSwitch = NSSwitch()
     private let switchingDurationSeconds = NSTextField(string: "1.0")
     private let switchingDurationStepper = NSStepper()
@@ -171,8 +169,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
          onPreview: @escaping () -> Void,
          onFullScreenChange: @escaping () -> Void = {},
          onSwitchingChange: @escaping () -> Void = {},
-         onMouseChange: @escaping () -> Void = {},
-         diagnosticsProvider: @escaping () -> String = { InputDiagnostics.report(observed: InputState.current()) }) {
+         onMouseChange: @escaping () -> Void = {}) {
         self.settings = settings
         self.loginItem = loginItem
         self.onChange = onChange
@@ -180,7 +177,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         self.onFullScreenChange = onFullScreenChange
         self.onSwitchingChange = onSwitchingChange
         self.onMouseChange = onMouseChange
-        self.diagnosticsProvider = diagnosticsProvider
         preview = PromptView(backgroundOpacity: settings.backgroundOpacity)
         fullScreenPreview = IndicatorView(backgroundOpacity: settings.fullScreenBackgroundOpacity, scale: settings.fullScreenScale)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 480),
@@ -450,24 +446,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         loginSettingsButton.target = self
         loginSettingsButton.action = #selector(openLoginSettings)
         page.addSubview(loginSettingsButton)
-        let help = NSTextField(wrappingLabelWithString: "部分输入法的内部中英文模式可能无法识别。\n提示不准确时，可复制诊断信息用于反馈。")
-        help.font = .systemFont(ofSize: 12)
-        help.textColor = .secondaryLabelColor
-        help.frame = NSRect(x: 16, y: 90, width: 480, height: 44)
-        page.addSubview(help)
-        button("复制诊断信息", id: "copyInputDiagnostics", action: #selector(copyDiagnostics),
-               frame: NSRect(x: 10, y: 44, width: 132, height: 32), in: page)
-        diagnosticsStatus.font = .systemFont(ofSize: 11)
-        diagnosticsStatus.textColor = .secondaryLabelColor
-        diagnosticsStatus.frame = NSRect(x: 152, y: 50, width: 344, height: 20)
-        page.addSubview(diagnosticsStatus)
-    }
-
-    @objc private func copyDiagnostics() {
-        let report = diagnosticsProvider()
-        NSPasteboard.general.clearContents()
-        let copied = NSPasteboard.general.setString(report, forType: .string)
-        diagnosticsStatus.stringValue = copied ? "已复制，可粘贴到问题反馈中。" : "复制失败，请重试。"
+        label("应用运行时，可从菜单栏查看当前输入法或打开设置。", in: page,
+              frame: NSRect(x: 16, y: 108, width: 480, height: 20), size: 12, secondary: true)
     }
 
     @objc private func changeSection() {
