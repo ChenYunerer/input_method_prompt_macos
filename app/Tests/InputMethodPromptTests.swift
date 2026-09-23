@@ -22,6 +22,7 @@ enum Tests {
             checkInputMonitorRecovery()
             checkCapsLockAfterWindowClick()
             checkUnavailableCapsLock()
+            checkCapsLockClientRecovery()
             print("输入状态专项完成，失败数：\(failures)")
             exit(failures == 0 ? 0 : 1)
         }
@@ -29,6 +30,7 @@ enum Tests {
             checkCapsLockReader()
             checkCapsLockAfterWindowClick()
             checkUnavailableCapsLock()
+            checkCapsLockClientRecovery()
             checkCapsLockChanges(InputSource(id: "abc", name: "ABC", languages: ["en"]))
             checkTransientCapsLockDuringSourceSwitch()
             checkSourceBeforeCapsLock()
@@ -77,6 +79,7 @@ enum Tests {
         checkCapsLockReader()
         checkCapsLockAfterWindowClick()
         checkUnavailableCapsLock()
+        checkCapsLockClientRecovery()
         checkSettingsPersistenceAndControls()
         checkSwitchingPromptDuration()
         checkLoginItemControls()
@@ -207,6 +210,86 @@ enum Tests {
         states[0] = false
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         check(symbols.last == "中" && symbols.count == 5, "关闭真实锁定后恢复中文")
+    }
+
+    private static func checkCapsLockClientRecovery() {
+        var time: TimeInterval = 0
+        var creations = 0
+        var stale = false
+        var freshStates: [Bool?]? = [false, false, false]
+        weak var firstClient: NSObject?
+        var reader: CapsLockReader? = CapsLockReader(makeKeyboardQuery: {
+            creations += 1
+            let generation = creations
+            let client = NSObject()
+            if generation == 1 { firstClient = client }
+            return {
+                withExtendedLifetime(client) {
+                    if generation == 1 { return stale ? [nil, false, nil] : [false, false, false] }
+                    return freshStates
+                }
+            }
+        }, now: { time })
+        check(reader?.read() == false && creations == 1, "正常查询复用客户端")
+        stale = true
+        time = 20
+        check(reader?.read() == false && creations == 2,
+              "实测旧连接返回 [nil,false,nil] 时重建连接并在本次读取恢复")
+        check(firstClient == nil, "替换查询闭包时释放失效客户端")
+        for _ in 0..<20 { _ = reader?.read() }
+        check(creations == 2, "恢复后的健康客户端不会在每次轮询重建")
+        freshStates = nil
+        time = 20.2
+        check(reader?.read() == nil && creations == 2, "连接持续失败时在冷却期返回未知")
+        time = 20.5
+        check(reader?.read() == nil && creations == 3, "到达重试期限只重新创建一次")
+        for _ in 0..<5 { time += 0.08; _ = reader?.read() }
+        check(creations == 3, "80 毫秒轮询不导致反复重连")
+        freshStates = [false, false, true]
+        check(reader?.read() == true && creations == 3, "冷却期仍读取现有客户端，真实大写恢复可立即识别")
+        reader = nil
+
+        for unavailable: [Bool?]? in [nil, [], [nil, false, nil]] {
+            var attempts = 0
+            var clock: TimeInterval = 0
+            let recovery = CapsLockReader(makeKeyboardQuery: {
+                attempts += 1
+                let generation = attempts
+                return { generation == 1 ? unavailable : [false] }
+            }, now: { clock })
+            check(recovery.read() == nil && attempts == 1, "启动时不可用不猜测状态或立即反复创建客户端")
+            clock = 0.5
+            check(recovery.read() == false && attempts == 2, "枚举失败、空列表或部分属性失效均可重建恢复")
+        }
+
+        var source = InputSource(id: "abc", name: "ABC", languages: ["en"])
+        var oldConnectionExpired = false
+        var currentCaps = false
+        var clientCount = 0
+        var clock: TimeInterval = 0
+        let recovery = CapsLockReader(makeKeyboardQuery: {
+            clientCount += 1
+            let generation = clientCount
+            return { generation == 1 && oldConnectionExpired ? [nil, false, nil] : [false, false, currentCaps] }
+        }, now: { clock })
+        let monitor = InputSourceMonitor(readState: {
+            recovery.read().map { InputState(source: source, capsLock: $0) }
+        }, readCapsLock: { recovery.read() }, sourceNotifications: NotificationCenter(),
+           workspaceNotifications: NotificationCenter())
+        var symbols: [String] = []
+        monitor.onChange = { symbols.append($0.symbol) }
+        oldConnectionExpired = true
+        source = InputSource(id: "pinyin", name: "拼音", languages: ["zh-Hans"])
+        clock = 100
+        monitor.refresh()
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check(symbols == ["中"] && clientCount == 2, "长时间运行后旧服务失效不会永久阻断中英切换提示")
+        currentCaps = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.45))
+        check(symbols == ["中", "A"], "重建后仍识别真实大写锁定")
+        currentCaps = false
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        check(symbols == ["中", "A", "中"], "重建后关闭大写仍正确恢复输入法")
     }
 
     private static func checkUnavailableCapsLock() {

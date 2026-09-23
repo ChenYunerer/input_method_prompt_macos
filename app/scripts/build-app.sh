@@ -77,8 +77,8 @@ cat > "$STAGED_APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDisplayName</key><string>中英提示</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>AppIcon.icns</string>
-    <key>CFBundleShortVersionString</key><string>1.11.1</string>
-    <key>CFBundleVersion</key><string>33</string>
+    <key>CFBundleShortVersionString</key><string>1.11.2</string>
+    <key>CFBundleVersion</key><string>34</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>LSUIElement</key><true/>
     <key>NSHighResolutionCapable</key><true/>

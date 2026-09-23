@@ -6,14 +6,30 @@ import IOKit.hidsystem
 /// Both CGEventSource and IOHIDGetModifierLockState can retain a false Caps bit.
 final class CapsLockReader {
     static let shared = CapsLockReader()
+    typealias KeyboardStateQuery = () -> [Bool?]?
 
-    private let readKeyboardStates: () -> [Bool?]?
+    private let makeKeyboardQuery: () -> KeyboardStateQuery
+    private let now: () -> TimeInterval
+    private var readKeyboardStates: KeyboardStateQuery
+    private var retryAfter: TimeInterval
 
-    convenience init() {
-        // Keep one ARC-managed client; enumerate afresh to include hot-plugged
-        // keyboards and drop removed services without retaining stale states.
+    init(makeKeyboardQuery: @escaping () -> KeyboardStateQuery = CapsLockReader.makeSystemQuery,
+         now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.makeKeyboardQuery = makeKeyboardQuery
+        self.now = now
+        readKeyboardStates = makeKeyboardQuery()
+        retryAfter = now() + 0.5
+    }
+
+    convenience init(readKeyboardStates: @escaping KeyboardStateQuery) {
+        self.init(makeKeyboardQuery: { readKeyboardStates })
+    }
+
+    static func makeSystemQuery() -> KeyboardStateQuery {
+        // A simple client can retain disconnected services across sleep/device
+        // reconnects. Re-enumerating on that same client is not sufficient.
         let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
-        self.init(readKeyboardStates: {
+        return {
             guard let services = IOHIDEventSystemClientCopyServices(client) as? [IOHIDServiceClient] else {
                 return nil
             }
@@ -23,15 +39,20 @@ final class CapsLockReader {
             }.map {
                 CapsLockReader.readBoolean(IOHIDServiceClientCopyProperty($0, kIOHIDServiceCapsLockStateKey as CFString))
             }
-        })
-    }
-
-    init(readKeyboardStates: @escaping () -> [Bool?]?) {
-        self.readKeyboardStates = readKeyboardStates
+        }
     }
 
     func read() -> Bool? {
-        guard let states = readKeyboardStates(), !states.isEmpty else { return nil }
+        var snapshot = readKeyboardStates()
+        let complete = snapshot.map { !$0.isEmpty && $0.allSatisfy { $0 != nil } } ?? false
+        if !complete && now() >= retryAfter {
+            // Release the old client's closure and retry once with a fresh
+            // client. Limit rebuilds to twice per second while unavailable.
+            readKeyboardStates = makeKeyboardQuery()
+            retryAfter = now() + 0.5
+            snapshot = readKeyboardStates()
+        }
+        guard let states = snapshot, !states.isEmpty else { return nil }
         // macOS combines keyboard modifier states with OR. An idle keyboard
         // reporting false must not veto Caps Lock on another keyboard.
         if states.contains(true) { return true }
