@@ -23,6 +23,7 @@ enum Tests {
             checkCapsLockAfterWindowClick()
             checkUnavailableCapsLock()
             checkCapsLockClientRecovery()
+            checkCapsLockDeviceDiscovery()
             print("输入状态专项完成，失败数：\(failures)")
             exit(failures == 0 ? 0 : 1)
         }
@@ -31,6 +32,7 @@ enum Tests {
             checkCapsLockAfterWindowClick()
             checkUnavailableCapsLock()
             checkCapsLockClientRecovery()
+            checkCapsLockDeviceDiscovery()
             checkCapsLockChanges(InputSource(id: "abc", name: "ABC", languages: ["en"]))
             checkTransientCapsLockDuringSourceSwitch()
             checkSourceBeforeCapsLock()
@@ -80,6 +82,7 @@ enum Tests {
         checkCapsLockAfterWindowClick()
         checkUnavailableCapsLock()
         checkCapsLockClientRecovery()
+        checkCapsLockDeviceDiscovery()
         checkSettingsPersistenceAndControls()
         checkSwitchingPromptDuration()
         checkLoginItemControls()
@@ -290,6 +293,69 @@ enum Tests {
         currentCaps = false
         RunLoop.main.run(until: Date().addingTimeInterval(0.3))
         check(symbols == ["中", "A", "中"], "重建后关闭大写仍正确恢复输入法")
+    }
+
+    private static func checkCapsLockDeviceDiscovery() {
+        final class KeyboardService {
+            var caps: Bool?
+            init(_ caps: Bool?) { self.caps = caps }
+        }
+        let builtIn = KeyboardService(false)
+        let bluetooth = KeyboardService(true)
+        var keyboards = [builtIn]
+        var time: TimeInterval = 0
+        var creations = 0
+        let reader = CapsLockReader(makeKeyboardQuery: {
+            creations += 1
+            // A client's service list stays valid but omits later connections.
+            let capturedServices = keyboards
+            return { capturedServices.map { $0.caps } }
+        }, now: { time })
+        check(reader.read() == false && creations == 1, "只有内置键盘时读取初始列表")
+        keyboards.append(bluetooth)
+        time = 0.49
+        check(reader.read() == false && creations == 1, "列表刷新间隔内复用客户端，不每 80 毫秒重建")
+        time = 0.5
+        check(reader.read() == true && creations == 2,
+              "旧客户端只返回有效 false 时仍重新发现蓝牙键盘，不等待 nil 才恢复")
+        for _ in 0..<20 { _ = reader.read() }
+        check(creations == 2, "到期后只重建一次，多次查询共用新的客户端")
+        bluetooth.caps = false
+        check(reader.read() == false && creations == 2, "设备列表刷新间隔内仍实时读取大小写变化")
+        bluetooth.caps = true
+        keyboards = [builtIn]
+        time = 1
+        check(reader.read() == false && creations == 3,
+              "移除键盘后清除旧列表内仍为 true 的服务，不保留幽灵大写")
+        keyboards.append(bluetooth)
+        time = 1000
+        check(reader.read() == true && creations == 4, "长时间休眠后只刷新一次，不追补所有错过的周期")
+        time = 1000.2
+        _ = reader.read()
+        check(creations == 4, "恢复后按当前时间设置新期限，避免连续刷新")
+
+        var connected = [builtIn]
+        let start = ProcessInfo.processInfo.systemUptime
+        let liveReader = CapsLockReader(makeKeyboardQuery: {
+            let capturedServices = connected
+            return { capturedServices.map { $0.caps } }
+        }, now: { ProcessInfo.processInfo.systemUptime - start })
+        let source = InputSource(id: "abc", name: "ABC", languages: ["en"])
+        let monitor = InputSourceMonitor(readState: {
+            liveReader.read().map { InputState(source: source, capsLock: $0) }
+        }, readCapsLock: { liveReader.read() }, sourceNotifications: NotificationCenter(),
+           workspaceNotifications: NotificationCenter())
+        var symbols: [String] = []
+        monitor.onChange = { symbols.append($0.symbol) }
+        connected.append(bluetooth)
+        RunLoop.main.run(until: Date().addingTimeInterval(1.1))
+        check(symbols == ["A"], "蓝牙键盘接入后无需通知或重新启动即可确认真实大写")
+        bluetooth.caps = false
+        RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+        check(symbols == ["A", "a"], "发现蓝牙键盘后关闭大写仍正常提示")
+        builtIn.caps = true
+        RunLoop.main.run(until: Date().addingTimeInterval(0.45))
+        check(symbols == ["A", "a", "A"], "设备列表刷新不影响内置键盘大写识别")
     }
 
     private static func checkUnavailableCapsLock() {

@@ -52,7 +52,7 @@ open "dist/中英提示.app"
 
 使用 Carbon 的 `TISCopyCurrentKeyboardInputSource` 读取实际输入源，订阅 `kTISNotifySelectedKeyboardInputSourceChanged`，不根据按键猜测切换结果。系统自带「简体拼音 ↔ ABC」是本工程的目标场景。通过菜单切换或应用自动切换输入源时也会提示。
 
-Caps Lock 每 80 毫秒通过公开 `IOHIDServiceClientCopyProperty` 读取各键盘的 `HIDCapsLockState`，独立于输入源通知；不读取具体按键。任一键盘明确开启即为开启，全部明确关闭才为关闭；无键盘、枚举失败或无法判断时返回不可用并重试。健康时复用一个简单 HID 客户端；服务列表为空、枚举失败或任一属性不可读时，每隔至少 0.5 秒重建客户端并立即重读，避免长期复用失效连接阻断所有提示；不再使用会残留的事件标志和旧 `IOHIDGetModifierLockState`。接口说明见 [Apple IOKit 文档](https://developer.apple.com/documentation/iokit/2269430-iohidserviceclientcopyproperty)。
+Caps Lock 每 80 毫秒通过公开 `IOHIDServiceClientCopyProperty` 读取各键盘的 `HIDCapsLockState`，独立于输入源通知；不读取具体按键。任一键盘明确开启即为开启，全部明确关闭才为关闭；无键盘、枚举失败或无法判断时返回不可用并重试。简单 HID 客户端最多复用 0.5 秒，到期后的首次查询重新建立客户端；即使读数合法，也重新发现后接入的键盘，覆盖设备列表缺失和服务失效两种情况；不再使用会残留的事件标志和旧 `IOHIDGetModifierLockState`。接口说明见 [Apple IOKit 文档](https://developer.apple.com/documentation/iokit/2269430-iohidserviceclientcopyproperty)。
 
 输入源与 Caps Lock 更新会合并后再显示：普通变化需稳定 100 毫秒，大写锁定开启需稳定 250 毫秒，并在显示前重新读取状态，过滤中英文切换过程中的短暂大写标志。等待状态确认不计入浮层的停留时长（默认 1 秒）。回归测试覆盖通知先后顺序、短暂大写恢复、真实锁定保持及最终状态复核。
 
@@ -126,3 +126,8 @@ Caps Lock 每 80 毫秒通过公开 `IOHIDServiceClientCopyProperty` 读取各�
 ## 键盘服务失效后自动恢复（1.11.2 / build 34）
 
 修复长时间运行后，中英切换及鼠标标识同时不再更新的问题。现场旧客户端返回 `[nil, false, nil]`，新客户端可读取三个明确的关闭状态；此前只在失效客户端上重复枚举，无法恢复。现在检测不完整快照并按至少 0.5 秒间隔重建客户端，恢复后继续正常提示，健康时不重复创建。保留 Caps Lock 真实状态读取、防闪和 P0 前三项；不将未知状态默认当作关闭。
+
+
+## 蓝牙键盘接入后漏报修复（1.11.3 / build 35）
+
+build 34 只在属性不可读时重连，但旧客户端也可能只保留一个可读键盘，漏掉后接入的蓝牙键盘。现在客户端使用满 0.5 秒后的首次查询会刷新设备列表；保持原有 80 毫秒状态轮询和 100/250 毫秒防闪。修复覆盖键盘新增、移除、重新连接及长时间暂停后的发现，不按品牌或连接方式单独适配。

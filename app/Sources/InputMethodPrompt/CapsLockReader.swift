@@ -7,18 +7,19 @@ import IOKit.hidsystem
 final class CapsLockReader {
     static let shared = CapsLockReader()
     typealias KeyboardStateQuery = () -> [Bool?]?
+    private static let clientRefreshInterval: TimeInterval = 0.5
 
     private let makeKeyboardQuery: () -> KeyboardStateQuery
     private let now: () -> TimeInterval
     private var readKeyboardStates: KeyboardStateQuery
-    private var retryAfter: TimeInterval
+    private var refreshAfter: TimeInterval
 
     init(makeKeyboardQuery: @escaping () -> KeyboardStateQuery = CapsLockReader.makeSystemQuery,
          now: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.makeKeyboardQuery = makeKeyboardQuery
         self.now = now
         readKeyboardStates = makeKeyboardQuery()
-        retryAfter = now() + 0.5
+        refreshAfter = now() + Self.clientRefreshInterval
     }
 
     convenience init(readKeyboardStates: @escaping KeyboardStateQuery) {
@@ -26,8 +27,8 @@ final class CapsLockReader {
     }
 
     static func makeSystemQuery() -> KeyboardStateQuery {
-        // A simple client can retain disconnected services across sleep/device
-        // reconnects. Re-enumerating on that same client is not sufficient.
+        // A simple client's service list can omit newly connected keyboards
+        // while every retained service still returns a valid boolean.
         let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
         return {
             guard let services = IOHIDEventSystemClientCopyServices(client) as? [IOHIDServiceClient] else {
@@ -43,16 +44,14 @@ final class CapsLockReader {
     }
 
     func read() -> Bool? {
-        var snapshot = readKeyboardStates()
-        let complete = snapshot.map { !$0.isEmpty && $0.allSatisfy { $0 != nil } } ?? false
-        if !complete && now() >= retryAfter {
-            // Release the old client's closure and retry once with a fresh
-            // client. Limit rebuilds to twice per second while unavailable.
+        if now() >= refreshAfter {
+            // Refresh even successful queries: valid values do not guarantee
+            // that the client includes all currently connected keyboards.
+            // Replace once after a long pause, without catching up missed ticks.
             readKeyboardStates = makeKeyboardQuery()
-            retryAfter = now() + 0.5
-            snapshot = readKeyboardStates()
+            refreshAfter = now() + Self.clientRefreshInterval
         }
-        guard let states = snapshot, !states.isEmpty else { return nil }
+        guard let states = readKeyboardStates(), !states.isEmpty else { return nil }
         // macOS combines keyboard modifier states with OR. An idle keyboard
         // reporting false must not veto Caps Lock on another keyboard.
         if states.contains(true) { return true }
